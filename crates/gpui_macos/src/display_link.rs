@@ -69,6 +69,30 @@ impl DisplayLink {
         }
         Ok(())
     }
+
+    /// One frame request now, as a vsync would send it: the window's callback runs on the main
+    /// queue's next turn.
+    pub fn request_frame(&self) {
+        self.frame_requests.merge_data(1);
+    }
+
+    /// Starts the link from a thread of its own: CVDisplayLinkStart spawns the link's thread and
+    /// syncs it to the display, which kept the main thread about 5 ms on every resume.
+    pub fn start_detached(&self) {
+        struct Link(sys::DisplayLink);
+        // SAFETY: CVDisplayLinkStart may be called from any thread; the clone is a retain, released
+        // on that thread while the window's own reference stays.
+        unsafe impl Send for Link {}
+        impl Link {
+            fn start(mut self) {
+                unsafe { self.0.start() }.log_err();
+            }
+        }
+        if let Some(link) = self.display_link.clone() {
+            let link = Link(link);
+            std::thread::spawn(move || link.start());
+        }
+    }
 }
 
 impl Drop for DisplayLink {

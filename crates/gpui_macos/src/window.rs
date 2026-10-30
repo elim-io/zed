@@ -703,8 +703,11 @@ impl MacWindowState {
     fn resume_frames(&mut self) {
         if self.frames_paused.swap(false, Ordering::Relaxed) {
             self.last_busy_frame = Instant::now();
-            if let Some(display_link) = self.display_link.as_mut() {
-                display_link.start().log_err();
+            if let Some(display_link) = self.display_link.as_ref() {
+                // The work that woke the window (a key's echo, say) draws at once, not at the link's
+                // first vsync, and the link starts off the main thread.
+                display_link.request_frame();
+                display_link.start_detached();
             }
         }
     }
