@@ -13,6 +13,7 @@ use core_graphics::{
     color_space::CGColorSpace,
     context::{CGContext, CGTextDrawingMode},
     display::CGPoint,
+    geometry::CGAffineTransform,
 };
 use core_text::{
     font::CTFont,
@@ -53,6 +54,9 @@ use crate::open_type::apply_features_and_fallbacks;
 #[allow(non_upper_case_globals)]
 const kCGImageAlphaOnly: u32 = 7;
 
+/// The slant of a synthesised italic, x per unit of y: 12 degrees, FreeType's `FT_GlyphSlot_Oblique`.
+const OBLIQUE_SKEW: f32 = 0.2126;
+
 /// macOS text system using CoreText for font shaping.
 pub struct MacTextSystem(RwLock<MacTextSystemState>);
 
@@ -71,6 +75,9 @@ struct MacTextSystemState {
     font_ids_by_postscript_name: HashMap<String, FontId>,
     font_ids_by_font_key: HashMap<FontKey, SmallVec<[FontId; 4]>>,
     postscript_names_by_font_id: HashMap<FontId, String>,
+    /// A face with no italic of its own asked for in italic: the upright face's id -> a second id of the same face
+    /// whose glyphs are drawn slanted.
+    oblique_ids: HashMap<FontId, FontId>,
 }
 
 impl MacTextSystem {
@@ -84,6 +91,7 @@ impl MacTextSystem {
             font_ids_by_postscript_name: HashMap::default(),
             font_ids_by_font_key: HashMap::default(),
             postscript_names_by_font_id: HashMap::default(),
+            oblique_ids: HashMap::default(),
         }))
     }
 }
@@ -167,7 +175,12 @@ impl PlatformTextSystem for MacTextSystem {
                 },
             )?;
 
-            let font_id = candidates[ix];
+            let mut font_id = candidates[ix];
+            if font.style != FontStyle::Normal
+                && lock.fonts[font_id.0].properties().style == FontkitStyle::Normal
+            {
+                font_id = lock.oblique_id(font_id);
+            }
             lock.font_selections.insert(font.clone(), font_id);
             Ok(font_id)
         }
@@ -358,6 +371,25 @@ impl MacTextSystemState {
         Ok(font_ids)
     }
 
+    /// The slanted twin of an upright face, made once: the same font under a new id, which shapes as the upright one
+    /// and rasterizes skewed by `OBLIQUE_SKEW`.
+    fn oblique_id(&mut self, upright: FontId) -> FontId {
+        if let Some(id) = self.oblique_ids.get(&upright) {
+            return *id;
+        }
+        let id = FontId(self.fonts.len());
+        self.fonts.push(self.fonts[upright.0].clone());
+        if let Some(name) = self.postscript_names_by_font_id.get(&upright).cloned() {
+            self.postscript_names_by_font_id.insert(id, name);
+        }
+        self.oblique_ids.insert(upright, id);
+        id
+    }
+
+    fn is_oblique(&self, font_id: FontId) -> bool {
+        self.oblique_ids.values().any(|id| *id == font_id)
+    }
+
     fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Size<f32>> {
         Ok(size_from_vector2f(
             self.fonts[font_id.0].advance(glyph_id.0)?,
@@ -396,7 +428,11 @@ impl MacTextSystemState {
 
     fn raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
         let font = &self.fonts[params.font_id.0];
-        let scale = Transform2F::from_scale(params.scale_factor);
+        let mut scale = Transform2F::from_scale(params.scale_factor);
+        if self.is_oblique(params.font_id) {
+            // font-kit measures with y down: a point above the baseline moves right
+            scale = scale * Transform2F::row_major(1., -OBLIQUE_SKEW, 0., 1., 0., 0.);
+        }
         let bounds: Bounds<DevicePixels> = bounds_from_rect_i(font.raster_bounds(
             params.glyph_id.0,
             params.font_size.into(),
@@ -464,6 +500,17 @@ impl MacTextSystemState {
                 params.scale_factor as CGFloat,
             );
 
+            if self.is_oblique(params.font_id) {
+                cx.concat_ctm(CGAffineTransform::new(
+                    1.,
+                    0.,
+                    OBLIQUE_SKEW as CGFloat,
+                    1.,
+                    0.,
+                    0.,
+                ));
+            }
+
             let subpixel_shift = params
                 .subpixel_variant
                 .map(|v| v as f32 / SUBPIXEL_VARIANTS_X as f32);
@@ -510,6 +557,8 @@ impl MacTextSystemState {
         let mut string = CFMutableAttributedString::new();
         let mut max_ascent = 0.0f32;
         let mut max_descent = 0.0f32;
+        // the UTF-16 ranges asked for in a slanted face: CoreText hands back the upright one
+        let mut oblique_runs = SmallVec::<[(usize, usize, FontId); 2]>::new();
 
         {
             let mut text = text;
@@ -526,6 +575,9 @@ impl MacTextSystemState {
                 let length = utf16_end - utf16_start;
                 let cf_range = CFRange::init(utf16_start, length);
                 let font = &self.fonts[run.font_id.0];
+                if self.is_oblique(run.font_id) {
+                    oblique_runs.push((utf16_start as usize, utf16_end as usize, run.font_id));
+                }
 
                 let font_metrics = font.metrics();
                 let font_scale = f32::from(font_size) / font_metrics.units_per_em as f32;
@@ -560,7 +612,18 @@ impl MacTextSystemState {
                     .downcast::<CTFont>()
                     .unwrap()
             };
-            let font_id = self.id_for_native_font(font);
+            let first = run.string_indices().first().map(|ix| *ix as usize);
+            let oblique = oblique_runs
+                .iter()
+                .find(|(start, end, _)| first.is_some_and(|ix| (*start..*end).contains(&ix)))
+                .map(|(_, _, id)| *id)
+                .filter(|id| {
+                    self.postscript_names_by_font_id.get(id) == Some(&font.postscript_name())
+                });
+            let font_id = match oblique {
+                Some(id) => id,
+                None => self.id_for_native_font(font),
+            };
 
             let glyphs = match runs.last_mut() {
                 Some(run) if run.font_id == font_id => &mut run.glyphs,
