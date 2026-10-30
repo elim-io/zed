@@ -1155,6 +1155,10 @@ impl App {
                     // where DispatchTree::root_node_id asserts on empty nodes
                     let clear = window.draw(cx);
                     clear.clear();
+                    // Present that drawing now rather than at the first display-link frame, which comes
+                    // 10-20 ms later on macOS and redraws first if anything changed meanwhile.
+                    #[cfg(target_os = "macos")]
+                    window.present();
 
                     cx.window_handles.insert(id, window.handle);
                     cx.windows.get_mut(id).unwrap().replace(Box::new(window));

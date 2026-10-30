@@ -2778,7 +2778,7 @@ impl Window {
     }
 
     #[profiling::function]
-    fn present(&mut self) {
+    pub(crate) fn present(&mut self) {
         self.platform_window.draw(&self.rendered_frame.scene);
         #[cfg(feature = "input-latency-histogram")]
         self.input_latency_tracker.record_frame_presented();
