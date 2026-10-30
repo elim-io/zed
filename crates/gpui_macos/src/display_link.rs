@@ -3,12 +3,18 @@ use core_graphics::display::CGDirectDisplayID;
 use dispatch2::{
     _dispatch_source_type_data_add, DispatchObject, DispatchQueue, DispatchRetained, DispatchSource,
 };
-use std::ffi::c_void;
+use std::{
+    ffi::c_void,
+    sync::{Arc, Mutex},
+};
 use util::ResultExt;
 
 pub struct DisplayLink {
     display_link: Option<sys::DisplayLink>,
     frame_requests: DispatchRetained<DispatchSource>,
+    /// Whether the link should run, held while it is started or stopped: a `start_detached` thread that
+    /// comes late starts nothing once `stop` or the drop said no.
+    run: Arc<Mutex<bool>>,
 }
 
 impl DisplayLink {
@@ -52,11 +58,14 @@ impl DisplayLink {
             Ok(Self {
                 display_link: Some(display_link),
                 frame_requests,
+                run: Arc::new(Mutex::new(false)),
             })
         }
     }
 
     pub fn start(&mut self) -> Result<()> {
+        let mut run = self.run.lock().unwrap_or_else(|e| e.into_inner());
+        *run = true;
         unsafe {
             self.display_link.as_mut().unwrap().start()?;
         }
@@ -64,6 +73,8 @@ impl DisplayLink {
     }
 
     pub fn stop(&mut self) -> Result<()> {
+        let mut run = self.run.lock().unwrap_or_else(|e| e.into_inner());
+        *run = false;
         unsafe {
             self.display_link.as_mut().unwrap().stop()?;
         }
@@ -79,17 +90,21 @@ impl DisplayLink {
     /// Starts the link from a thread of its own: CVDisplayLinkStart spawns the link's thread and
     /// syncs it to the display, which kept the main thread about 5 ms on every resume.
     pub fn start_detached(&self) {
-        struct Link(sys::DisplayLink);
+        struct Link(sys::DisplayLink, Arc<Mutex<bool>>);
         // SAFETY: CVDisplayLinkStart may be called from any thread; the clone is a retain, released
         // on that thread while the window's own reference stays.
         unsafe impl Send for Link {}
         impl Link {
             fn start(mut self) {
-                unsafe { self.0.start() }.log_err();
+                let run = self.1.lock().unwrap_or_else(|e| e.into_inner());
+                if *run {
+                    unsafe { self.0.start() }.log_err();
+                }
             }
         }
         if let Some(link) = self.display_link.clone() {
-            let link = Link(link);
+            *self.run.lock().unwrap_or_else(|e| e.into_inner()) = true;
+            let link = Link(link, self.run.clone());
             std::thread::spawn(move || link.start());
         }
     }
@@ -106,6 +121,10 @@ impl Drop for DisplayLink {
         //
         // We might also want to upgrade to CADisplayLink, but that requires dropping old macOS support.
         std::mem::forget(self.display_link.take());
+        // The link is never released, so the source its callback merges into is not either: a callback
+        // in flight past the stop merges into a cancelled source, not freed memory (a SIGSEGV in
+        // dispatch_source_merge_data on the CVDisplayLink thread, seen on ergate's build node).
+        std::mem::forget(self.frame_requests.clone());
         self.frame_requests.cancel();
     }
 }
