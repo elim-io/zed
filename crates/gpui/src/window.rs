@@ -118,6 +118,8 @@ struct WindowInvalidatorInner {
     pub dirty_views: FxHashSet<EntityId>,
     pub update_count: usize,
     pub frame_dirty: FrameDirtyAccumulator,
+    /// The platform's [`PlatformWindow::frame_waker`], run when the window gets work for a frame.
+    pub waker: Option<Rc<dyn Fn()>>,
 }
 
 /// Per-frame invalidation bookkeeping, drained at draw time and emitted to the
@@ -144,7 +146,20 @@ impl WindowInvalidator {
                 dirty_views: FxHashSet::default(),
                 update_count: 0,
                 frame_dirty: FrameDirtyAccumulator::default(),
+                waker: None,
             })),
+        }
+    }
+
+    pub fn set_waker(&self, waker: Option<Box<dyn Fn()>>) {
+        self.inner.borrow_mut().waker = waker.map(Rc::from);
+    }
+
+    /// Resumes a frame source the platform paused while the window was idle.
+    pub fn wake(&self) {
+        let waker = self.inner.borrow().waker.clone();
+        if let Some(waker) = waker {
+            waker();
         }
     }
 
@@ -156,6 +171,8 @@ impl WindowInvalidator {
             Self::record_frame_dirty(&mut inner);
             inner.dirty = true;
             cx.push_effect(Effect::Notify { emitter: entity });
+            drop(inner);
+            self.wake();
             true
         } else {
             false
@@ -172,6 +189,8 @@ impl WindowInvalidator {
         if dirty {
             inner.update_count += 1;
             Self::record_frame_dirty(&mut inner);
+            drop(inner);
+            self.wake();
         }
     }
 
@@ -1339,6 +1358,7 @@ impl Window {
         let appearance = platform_window.appearance();
         let text_system = Arc::new(WindowTextSystem::new(cx.text_system().clone()));
         let invalidator = WindowInvalidator::new();
+        invalidator.set_waker(platform_window.frame_waker());
         let active = Rc::new(Cell::new(platform_window.is_active()));
         let hovered = Rc::new(Cell::new(platform_window.is_hovered()));
         let needs_present = Rc::new(Cell::new(false));
@@ -1484,18 +1504,22 @@ impl Window {
                         // next frame callback, so we must call `surface.commit()` (via
                         // `complete_frame`) or the compositor won't send another callback.
                         handle
-                            .update(&mut cx, |_, window, _| window.complete_frame())
+                            .update(&mut cx, |_, window, _| {
+                                window.complete_frame();
+                                window.platform_window.frame_idle(false);
+                            })
                             .log_err();
                         return;
                     }
                 }
                 last_frame_time.set(Some(now));
 
-                let next_frame_callbacks = next_frame_callbacks.take();
-                if !next_frame_callbacks.is_empty() {
+                let callbacks = next_frame_callbacks.take();
+                let ran_callbacks = !callbacks.is_empty();
+                if ran_callbacks {
                     handle
                         .update(&mut cx, |_, window, cx| {
-                            for callback in next_frame_callbacks {
+                            for callback in callbacks {
                                 callback(window, cx);
                             }
                         })
@@ -1509,7 +1533,8 @@ impl Window {
                     || needs_present.get()
                     || (active.get() && input_rate_tracker.borrow_mut().is_high_rate());
 
-                if invalidator.is_dirty() || request_frame_options.force_render {
+                let drew = invalidator.is_dirty() || request_frame_options.force_render;
+                if drew {
                     measure("frame duration", || {
                         handle
                             .update(&mut cx, |_, window, cx| {
@@ -1530,9 +1555,14 @@ impl Window {
                         .log_err();
                 }
 
+                // Idle: nothing drawn, presented or run, and nothing queued for the next frame.
+                let idle = !(drew || needs_present || ran_callbacks)
+                    && !invalidator.is_dirty()
+                    && next_frame_callbacks.borrow().is_empty();
                 handle
                     .update(&mut cx, |_, window, _| {
                         window.complete_frame();
+                        window.platform_window.frame_idle(idle);
                     })
                     .log_err();
             }
@@ -2158,6 +2188,7 @@ impl Window {
     /// Schedule the given closure to be run directly after the current frame is rendered.
     pub fn on_next_frame(&self, callback: impl FnOnce(&mut Window, &mut App) + 'static) {
         RefCell::borrow_mut(&self.next_frame_callbacks).push(Box::new(callback));
+        self.invalidator.wake();
     }
 
     /// Schedule a frame to be drawn on the next animation frame.

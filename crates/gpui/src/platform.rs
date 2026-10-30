@@ -661,6 +661,15 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn on_button_layout_changed(&self, _callback: Box<dyn FnMut()>) {}
     fn draw(&self, scene: &Scene);
     fn completed_frame(&self) {}
+    /// Called after each frame request: `idle` when it drew, presented and ran nothing and nothing is
+    /// pending. A platform may pause its frame source after a while idle; [`Self::frame_waker`]
+    /// resumes it.
+    fn frame_idle(&self, _idle: bool) {}
+    /// A callback gpui runs when the window gets work for a frame (it is invalidated or a next-frame
+    /// callback is queued), so a frame source paused while idle starts again.
+    fn frame_waker(&self) -> Option<Box<dyn Fn()>> {
+        None
+    }
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
     fn is_subpixel_rendering_supported(&self) -> bool;
 

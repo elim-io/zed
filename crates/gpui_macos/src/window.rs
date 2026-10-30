@@ -69,9 +69,14 @@ use std::{
         Arc, Weak,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use util::ResultExt;
+
+/// How long a window draws nothing before its display link stops (`MacWindowState::frame_idle`).
+/// The link wakes the main thread every vsync, 120 times a second on ProMotion displays, even with
+/// nothing to draw; the grace keeps it running through pauses in typing or an animation's frames.
+const IDLE_PAUSE: Duration = Duration::from_millis(500);
 
 const WINDOW_STATE_IVAR: &str = "windowState";
 
@@ -500,6 +505,10 @@ struct MacWindowState {
     cursor_style: CursorStyle,
     cursor_visible: Arc<AtomicBool>,
     display_link: Option<DisplayLink>,
+    // The display link is stopped (not dropped) after IDLE_PAUSE of idle frames; `frame_waker`
+    // starts it again.
+    frames_paused: Arc<AtomicBool>,
+    last_busy_frame: Instant,
     renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
@@ -670,11 +679,34 @@ impl MacWindowState {
         {
             display_link.start().log_err();
             self.display_link = Some(display_link);
+            self.last_busy_frame = Instant::now();
         }
     }
 
     fn stop_display_link(&mut self) {
         self.display_link = None;
+        self.frames_paused.store(false, Ordering::Relaxed);
+    }
+
+    fn frame_idle(&mut self, idle: bool) {
+        let now = Instant::now();
+        if !idle {
+            self.last_busy_frame = now;
+        } else if now.duration_since(self.last_busy_frame) >= IDLE_PAUSE
+            && let Some(display_link) = self.display_link.as_mut()
+            && !self.frames_paused.swap(true, Ordering::Relaxed)
+        {
+            display_link.stop().log_err();
+        }
+    }
+
+    fn resume_frames(&mut self) {
+        if self.frames_paused.swap(false, Ordering::Relaxed) {
+            self.last_busy_frame = Instant::now();
+            if let Some(display_link) = self.display_link.as_mut() {
+                display_link.start().log_err();
+            }
+        }
     }
 
     fn is_maximized(&self) -> bool {
@@ -881,6 +913,8 @@ impl MacWindow {
                 cursor_style: CursorStyle::Arrow,
                 cursor_visible,
                 display_link: None,
+                frames_paused: Arc::new(AtomicBool::new(false)),
+                last_busy_frame: Instant::now(),
                 renderer: renderer::new_renderer(
                     renderer_context,
                     native_window as *mut _,
@@ -1732,6 +1766,22 @@ impl PlatformWindow for MacWindow {
     fn draw(&self, scene: &gpui::Scene) {
         let mut this = self.0.lock();
         this.renderer.draw(scene);
+    }
+
+    fn frame_idle(&self, idle: bool) {
+        self.0.lock().frame_idle(idle);
+    }
+
+    fn frame_waker(&self) -> Option<Box<dyn Fn()>> {
+        let paused = self.0.lock().frames_paused.clone();
+        let state = Arc::downgrade(&self.0);
+        Some(Box::new(move || {
+            if paused.load(Ordering::Relaxed)
+                && let Some(state) = state.upgrade()
+            {
+                state.lock().resume_frames();
+            }
+        }))
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
