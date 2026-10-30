@@ -67,7 +67,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc, Weak,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -77,6 +77,11 @@ use util::ResultExt;
 /// The link wakes the main thread every vsync, 120 times a second on ProMotion displays, even with
 /// nothing to draw; the grace keeps it running through pauses in typing or an animation's frames.
 const IDLE_PAUSE: Duration = Duration::from_millis(500);
+
+/// How long an invalidated window may go without a frame from a display link that is not paused before the waker
+/// starts the link again. A link stopped for idle and started again right away was seen to stay stopped (no frames
+/// until an occlusion change made a new link), so the waker does not trust the paused flag alone.
+const LINK_STALL: Duration = Duration::from_millis(100);
 
 const WINDOW_STATE_IVAR: &str = "windowState";
 
@@ -509,6 +514,9 @@ struct MacWindowState {
     // starts it again.
     frames_paused: Arc<AtomicBool>,
     last_busy_frame: Instant,
+    // When the display link last delivered a frame, in ms since `frames_epoch` (read by the waker).
+    frame_seen: Arc<AtomicU64>,
+    frames_epoch: Instant,
     renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
@@ -690,6 +698,10 @@ impl MacWindowState {
 
     fn frame_idle(&mut self, idle: bool) {
         let now = Instant::now();
+        self.frame_seen.store(
+            now.duration_since(self.frames_epoch).as_millis() as u64,
+            Ordering::Relaxed,
+        );
         if !idle {
             self.last_busy_frame = now;
         } else if now.duration_since(self.last_busy_frame) >= IDLE_PAUSE
@@ -700,9 +712,14 @@ impl MacWindowState {
         }
     }
 
-    fn resume_frames(&mut self) {
-        if self.frames_paused.swap(false, Ordering::Relaxed) {
+    /// `stalled`: the link is not paused but has delivered no frame for LINK_STALL.
+    fn resume_frames(&mut self, stalled: bool) {
+        if self.frames_paused.swap(false, Ordering::Relaxed) || stalled {
             self.last_busy_frame = Instant::now();
+            self.frame_seen.store(
+                self.frames_epoch.elapsed().as_millis() as u64,
+                Ordering::Relaxed,
+            );
             if let Some(display_link) = self.display_link.as_ref() {
                 // The work that woke the window (a key's echo, say) draws at once, not at the link's
                 // first vsync, and the link starts off the main thread.
@@ -918,6 +935,8 @@ impl MacWindow {
                 display_link: None,
                 frames_paused: Arc::new(AtomicBool::new(false)),
                 last_busy_frame: Instant::now(),
+                frame_seen: Arc::new(AtomicU64::new(0)),
+                frames_epoch: Instant::now(),
                 renderer: renderer::new_renderer(
                     renderer_context,
                     native_window as *mut _,
@@ -1776,13 +1795,24 @@ impl PlatformWindow for MacWindow {
     }
 
     fn frame_waker(&self) -> Option<Box<dyn Fn()>> {
-        let paused = self.0.lock().frames_paused.clone();
+        let (paused, seen, epoch) = {
+            let lock = self.0.lock();
+            (
+                lock.frames_paused.clone(),
+                lock.frame_seen.clone(),
+                lock.frames_epoch,
+            )
+        };
         let state = Arc::downgrade(&self.0);
         Some(Box::new(move || {
-            if paused.load(Ordering::Relaxed)
+            let paused = paused.load(Ordering::Relaxed);
+            let stalled = !paused
+                && epoch.elapsed().as_millis() as u64
+                    > seen.load(Ordering::Relaxed) + LINK_STALL.as_millis() as u64;
+            if (paused || stalled)
                 && let Some(state) = state.upgrade()
             {
-                state.lock().resume_frames();
+                state.lock().resume_frames(stalled);
             }
         }))
     }
