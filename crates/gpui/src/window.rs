@@ -1604,7 +1604,7 @@ impl Window {
             move |active| {
                 handle
                     .update(&mut cx, |_, window, cx| {
-                        window.active.set(active);
+                        let changed = window.active.replace(active) != active;
                         window.modifiers = window.platform_window.modifiers();
                         window.capslock = window.platform_window.capslock();
                         window
@@ -1613,7 +1613,10 @@ impl Window {
                             .retain(&(), |callback| callback(window, cx));
 
                         window.bounds_changed(cx);
-                        window.refresh();
+                        // A window shown key draws its first frame active already; redraw only on a change.
+                        if changed {
+                            window.refresh();
+                        }
 
                         SystemWindowTabController::update_last_active(cx, window.handle.id);
                     })
@@ -1625,8 +1628,9 @@ impl Window {
             move |active| {
                 handle
                     .update(&mut cx, |_, window, _| {
-                        window.hovered.set(active);
-                        window.refresh();
+                        if window.hovered.replace(active) != active {
+                            window.refresh();
+                        }
                     })
                     .log_err();
             }
@@ -2245,11 +2249,19 @@ impl Window {
     /// the platform window, then notifies observers. Normally called automatically
     /// by the platform's resize callback, but exposed publicly for test infrastructure.
     pub fn bounds_changed(&mut self, cx: &mut App) {
-        self.scale_factor = self.platform_window.scale_factor();
-        self.viewport_size = self.platform_window.content_size();
-        self.display_id = self.platform_window.display().map(|display| display.id());
+        let scale_factor = self.platform_window.scale_factor();
+        let viewport_size = self.platform_window.content_size();
+        let display_id = self.platform_window.display().map(|display| display.id());
 
-        self.refresh();
+        // A move within one display, or an activation, changes nothing drawn.
+        if (scale_factor, viewport_size, display_id)
+            != (self.scale_factor, self.viewport_size, self.display_id)
+        {
+            self.scale_factor = scale_factor;
+            self.viewport_size = viewport_size;
+            self.display_id = display_id;
+            self.refresh();
+        }
 
         self.bounds_observers
             .clone()
