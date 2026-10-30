@@ -1037,6 +1037,7 @@ pub struct Window {
     pub(crate) dirty_views: FxHashSet<EntityId>,
     focus_listeners: SubscriberSet<(), AnyWindowFocusListener>,
     pub(crate) focus_lost_listeners: SubscriberSet<(), AnyObserver>,
+    keys_on_rendered_frame: bool,
     default_prevented: bool,
     mouse_position: Point<Pixels>,
     mouse_hit_test: HitTest,
@@ -1748,6 +1749,7 @@ impl Window {
             dirty_views: FxHashSet::default(),
             focus_listeners: SubscriberSet::new(),
             focus_lost_listeners: SubscriberSet::new(),
+            keys_on_rendered_frame: false,
             default_prevented: true,
             mouse_position,
             mouse_hit_test: HitTest::default(),
@@ -1897,6 +1899,14 @@ impl Window {
     /// Obtain a handle to the window that belongs to this context.
     pub fn window_handle(&self) -> AnyWindowHandle {
         self.handle
+    }
+
+    /// Dispatch a key on the frame last drawn while the focus is the same as then, instead of drawing the window
+    /// first whenever a view has changed since. A window whose content changes every frame (a terminal under a
+    /// flood of output) otherwise draws the whole window, and throws that drawing away, before each key; the key
+    /// then sees key contexts up to one frame old. A focus change still draws first.
+    pub fn set_keys_on_rendered_frame(&mut self, on: bool) {
+        self.keys_on_rendered_frame = on;
     }
 
     /// Mark the window as dirty, scheduling it to be redrawn on the next frame.
@@ -4726,7 +4736,9 @@ impl Window {
     }
 
     fn dispatch_key_event(&mut self, event: &dyn Any, cx: &mut App) {
-        if self.invalidator.is_dirty() {
+        if self.invalidator.is_dirty()
+            && !(self.keys_on_rendered_frame && self.rendered_frame.focus == self.focus)
+        {
             self.draw(cx).clear();
         }
 
