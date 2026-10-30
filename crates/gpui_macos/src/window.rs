@@ -712,8 +712,13 @@ impl MacWindowState {
         }
     }
 
-    /// `stalled`: the link is not paused but has delivered no frame for LINK_STALL.
+    /// `stalled`: the link is not paused but has delivered no frame for LINK_STALL. Starting that link
+    /// again did not bring its frames back (one frame per waker call, from the request below); a new
+    /// link, as an occlusion change makes, does.
     fn resume_frames(&mut self, stalled: bool) {
+        if stalled && self.display_link.is_some() {
+            self.start_display_link();
+        }
         if self.frames_paused.swap(false, Ordering::Relaxed) || stalled {
             self.last_busy_frame = Instant::now();
             self.frame_seen.store(
