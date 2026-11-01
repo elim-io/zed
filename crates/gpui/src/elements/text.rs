@@ -701,6 +701,18 @@ impl TextLayout {
                             &runs,
                             truncate_from,
                         )
+                    } else if !text.contains('\n')
+                        && truncate_width.is_some_and(|w| {
+                            window
+                                .text_system()
+                                .layout_line(&text, font_size, &runs, None)
+                                .width
+                                <= w
+                        })
+                    {
+                        // The box is the shaped (kerned) line's width, while `truncate_line` sums each character's
+                        // advance alone: with a kerned face that sum passes the box and cuts a line that fits.
+                        (text.clone(), Cow::Borrowed(&*runs))
                     } else {
                         line_wrapper.truncate_line(
                             text.clone(),
