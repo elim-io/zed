@@ -1285,6 +1285,45 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Set the disabled state for this element (`AXEnabled` false on macOS).
+    /// A press by an assistive technology on a disabled element reaches no handler.
+    fn aria_disabled(mut self, disabled: bool) -> Self {
+        self.interactivity().aria_disabled = Some(disabled);
+        self
+    }
+
+    /// Set the text value of this element (`AXValue` on macOS): a field's words,
+    /// or the words of a state the element draws itself.
+    fn aria_value(mut self, value: impl Into<SharedString>) -> Self {
+        self.interactivity().aria_value = Some(value.into());
+        self
+    }
+
+    /// Set the description of this element (`AXHelp` on macOS).
+    fn aria_description(mut self, description: impl Into<SharedString>) -> Self {
+        self.interactivity().aria_description = Some(description.into());
+        self
+    }
+
+    /// Set the placeholder of this element (shown on macOS for an empty text input).
+    fn aria_placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
+        self.interactivity().aria_placeholder = Some(placeholder.into());
+        self
+    }
+
+    /// Set the modal state of this element (`AXModal` on a dialog on macOS).
+    fn aria_modal(mut self, modal: bool) -> Self {
+        self.interactivity().aria_modal = Some(modal);
+        self
+    }
+
+    /// Set the class name of this element: not shown on macOS, read by tests
+    /// and tree dumps (a design system writes its component's name here).
+    fn aria_class_name(mut self, class_name: impl Into<SharedString>) -> Self {
+        self.interactivity().aria_class_name = Some(class_name.into());
+        self
+    }
+
     /// Register a handler for an accessibility action on this element.
     /// The handler is called when a screen reader requests the given action.
     ///
@@ -1877,6 +1916,12 @@ pub struct Interactivity {
     pub(crate) aria_column_index: Option<usize>,
     pub(crate) aria_row_count: Option<usize>,
     pub(crate) aria_column_count: Option<usize>,
+    pub(crate) aria_disabled: Option<bool>,
+    pub(crate) aria_value: Option<SharedString>,
+    pub(crate) aria_description: Option<SharedString>,
+    pub(crate) aria_placeholder: Option<SharedString>,
+    pub(crate) aria_modal: Option<bool>,
+    pub(crate) aria_class_name: Option<SharedString>,
 
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) source_location: Option<&'static core::panic::Location<'static>>,
@@ -2188,6 +2233,24 @@ impl Interactivity {
                     window.next_frame.tab_stops.insert(focus_handle);
                 }
 
+                // An assistive technology's press calls the click listeners, as Enter on
+                // the focused element does; `paint_mouse_listeners` takes them first.
+                // A disabled element takes the press and does nothing with it.
+                let mut a11y_press: Option<Vec<ClickListener>> = None;
+                if window.a11y.is_active()
+                    && global_id.is_some()
+                    && !self
+                        .a11y_action_listeners
+                        .iter()
+                        .any(|(action, _)| *action == accesskit::Action::Click)
+                {
+                    if self.aria_disabled == Some(true) {
+                        a11y_press = Some(Vec::new());
+                    } else if !self.click_listeners.is_empty() {
+                        a11y_press = Some(self.click_listeners.clone());
+                    }
+                }
+
                 window.with_element_opacity(style.opacity, |window| {
                     style.paint(bounds, window, cx, |window: &mut Window, cx: &mut App| {
                         window.with_text_style(style.text_style().cloned(), |window| {
@@ -2235,15 +2298,30 @@ impl Interactivity {
 
                                         if window.a11y.is_active() {
                                             if let Some(global_id) = global_id {
-                                                if !self.a11y_action_listeners.is_empty() {
-                                                    let node_id = global_id.accesskit_node_id();
-                                                    for (action, listener) in
-                                                        self.a11y_action_listeners.drain(..)
-                                                    {
-                                                        window.on_a11y_action(
-                                                            node_id, action, listener,
-                                                        );
-                                                    }
+                                                let node_id = global_id.accesskit_node_id();
+                                                for (action, listener) in
+                                                    self.a11y_action_listeners.drain(..)
+                                                {
+                                                    window.on_a11y_action(
+                                                        node_id, action, listener,
+                                                    );
+                                                }
+                                                if let Some(listeners) = a11y_press.take() {
+                                                    window.on_a11y_action(
+                                                        node_id,
+                                                        accesskit::Action::Click,
+                                                        move |_, window, cx| {
+                                                            let event = ClickEvent::Keyboard(
+                                                                KeyboardClickEvent {
+                                                                    button: KeyboardButton::Enter,
+                                                                    bounds,
+                                                                },
+                                                            );
+                                                            for listener in &listeners {
+                                                                listener(&event, window, cx);
+                                                            }
+                                                        },
+                                                    );
                                                 }
                                             }
                                         }
@@ -3099,7 +3177,29 @@ impl Interactivity {
         if let Some(count) = self.aria_column_count {
             node.set_column_count(count);
         }
-        if !self.click_listeners.is_empty() {
+        if let Some(id) = &self.element_id {
+            node.set_author_id(id.to_string());
+        }
+        let disabled = self.aria_disabled == Some(true);
+        if disabled {
+            node.set_disabled();
+        }
+        if let Some(value) = &self.aria_value {
+            node.set_value(value.to_string());
+        }
+        if let Some(description) = &self.aria_description {
+            node.set_description(description.to_string());
+        }
+        if let Some(placeholder) = &self.aria_placeholder {
+            node.set_placeholder(placeholder.to_string());
+        }
+        if self.aria_modal == Some(true) {
+            node.set_modal();
+        }
+        if let Some(class_name) = &self.aria_class_name {
+            node.set_class_name(class_name.to_string());
+        }
+        if !self.click_listeners.is_empty() && !disabled {
             node.add_action(accesskit::Action::Click);
         }
         if self.tracked_focus_handle.is_some() || self.focusable {

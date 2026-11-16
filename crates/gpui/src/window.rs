@@ -2900,6 +2900,10 @@ impl Window {
         if a11y_active_start_of_frame {
             // clear the builder state regardless
             let tree_update = self.a11y.end_frame();
+            #[cfg(any(test, feature = "test-support"))]
+            {
+                self.a11y.last_tree = Some(tree_update.clone());
+            }
 
             if should_send_a11y_update {
                 log::debug!(
@@ -5545,6 +5549,33 @@ impl Window {
             .entry(node_id)
             .or_default()
             .push((action, Box::new(listener)));
+    }
+
+    /// Turns accessibility on for this window as an AX client's first query
+    /// would, with no adapter, and redraws: every later frame builds the tree.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn a11y_force_active(&mut self) {
+        self.a11y.force_active();
+        self.refresh();
+    }
+
+    /// The last frame's whole accessibility tree, `None` before a frame was
+    /// drawn with accessibility active.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn a11y_tree(&self) -> Option<&accesskit::TreeUpdate> {
+        self.a11y.last_tree.as_ref()
+    }
+
+    /// The global ids of the nodes the last frame dropped as duplicates.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn a11y_duplicates(&self) -> &[String] {
+        &self.a11y.duplicates
+    }
+
+    /// Performs an accessibility action as an AX client's request would.
+    #[cfg(all(any(test, feature = "test-support"), not(target_family = "wasm")))]
+    pub fn a11y_perform(&mut self, request: accesskit::ActionRequest, cx: &mut App) {
+        self.handle_a11y_action(request, cx);
     }
 
     #[cfg(not(target_family = "wasm"))]

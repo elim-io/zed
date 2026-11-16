@@ -52,7 +52,12 @@
 //! Since `middle` doesn't have an ID itself, it has no global ID.
 //!
 //! [`GlobalElementId`]s should be unique per-frame. Duplicate global IDs in the
-//! same frame will likely cause bugs.
+//! same frame will likely cause bugs: in the accessibility tree the second
+//! node is dropped and its id logged once.
+//!
+//! Every node's `author_id` (`AXIdentifier` on macOS) is its element's own id
+//! as text (`ElementId`'s `Display`), so a test or an automation client finds a
+//! node by the id the app gave it, whatever language its label is in.
 //!
 //! ### IDs and accessibility
 //!
@@ -217,7 +222,16 @@
 //!
 //! Note that some common actions are automatically registered. For example,
 //! [`.on_click()`][StatefulInteractiveElement::on_click] adds an
-//! [`AccessibleAction::Click`] handler that calls the click handler.
+//! [`AccessibleAction::Click`] handler that calls the click handlers with a
+//! `ClickEvent::Keyboard` (Enter, the element's bounds), as Enter on the
+//! focused element does. An element with
+//! [`.aria_disabled(true)`][StatefulInteractiveElement::aria_disabled] lists
+//! no `Click` and a press on it reaches no handler.
+//!
+//! A cached view is not reused while accessibility is active, so its nodes are
+//! in every frame. Under `test-support`, `Window::a11y_force_active`,
+//! `a11y_tree`, `a11y_duplicates` and `a11y_perform` read and drive the tree in
+//! a test.
 //!
 //! ## Further reading
 //!

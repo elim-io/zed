@@ -132,6 +132,12 @@ pub(crate) struct A11y {
     pub(crate) focus_ids: FxHashMap<NodeId, FocusId>,
     pub(crate) node_bounds: FxHashMap<NodeId, Bounds<Pixels>>,
     pub(crate) action_listeners: FxHashMap<NodeId, Vec<(Action, A11yActionListener)>>,
+    /// The last frame's whole tree, for tests and tree dumps.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) last_tree: Option<TreeUpdate>,
+    /// The global ids of the nodes dropped as duplicates in the last frame.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) duplicates: Vec<String>,
 }
 
 impl A11y {
@@ -144,6 +150,10 @@ impl A11y {
             focus_ids: FxHashMap::default(),
             node_bounds: FxHashMap::default(),
             action_listeners: FxHashMap::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            last_tree: None,
+            #[cfg(any(test, feature = "test-support"))]
+            duplicates: Vec::new(),
         }
     }
 
@@ -164,26 +174,20 @@ impl A11y {
         self.focus_ids.clear();
         self.node_bounds.clear();
         self.action_listeners.clear();
+        #[cfg(any(test, feature = "test-support"))]
+        self.duplicates.clear();
         self.nodes.begin_frame();
     }
 
     /// Finalize the tree and produce a [`TreeUpdate`] for the platform adapter.
     pub(crate) fn end_frame(&mut self) -> TreeUpdate {
-        let tree_update = self.nodes.finalize();
+        self.nodes.finalize()
+    }
 
-        // Zed currently doesn't set any a11y APIs on *any* UI elements, so a
-        // tree with nodes other than the root indicates a bug in the
-        // `TreeUpdate`-producing logic.
-        //
-        // Remove this when adding aria attributes.
-        if tree_update.nodes.len() > 1 {
-            log::warn!(
-                "expected an empty a11y tree update (only the root node), but got {} nodes; Zed has no accessible UI elements yet",
-                tree_update.nodes.len()
-            );
-        }
-
-        tree_update
+    /// Sets the active flag with no adapter, as an AX client's first query does.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn force_active(&mut self) {
+        self.active_flag.store(true, Ordering::SeqCst);
     }
 }
 
@@ -194,9 +198,9 @@ pub(crate) struct A11yNodeBuilder {
     /// `HashMap<NodeId, Node>` to remove the need for `seen_ids`
     all_nodes: Vec<(NodeId, accesskit::Node)>,
     seen_ids: FxHashSet<NodeId>,
+    /// Duplicate ids already logged: each is logged once, not once a frame.
+    logged_duplicates: FxHashSet<NodeId>,
     focus: NodeId,
-    #[cfg(debug_assertions)]
-    has_set_focus: bool,
 }
 
 impl A11yNodeBuilder {
@@ -206,9 +210,8 @@ impl A11yNodeBuilder {
             nodes_stack: SmallVec::new(),
             all_nodes: Vec::new(),
             seen_ids: FxHashSet::default(),
+            logged_duplicates: FxHashSet::default(),
             focus: ROOT_NODE_ID,
-            #[cfg(debug_assertions)]
-            has_set_focus: false,
         }
     }
 
@@ -220,10 +223,11 @@ impl A11yNodeBuilder {
         debug_assert!(!self.ids_stack.is_empty(), "push called before push_root");
 
         if !self.seen_ids.insert(id) {
-            debug_assert!(
-                false,
-                "Duplicate a11y node id: {id:?}. In a release build, this node would be silently discarded from the a11y tree."
-            );
+            if self.logged_duplicates.insert(id) {
+                log::error!(
+                    "a11y: duplicate node id {id:?}: two elements share one global id; the second is dropped from the tree"
+                );
+            }
             // We need to return `false` here because inserting a duplicate
             // node will cause a panic in accesskit
             return false;
@@ -253,10 +257,6 @@ impl A11yNodeBuilder {
         self.ids_stack.clear();
         self.nodes_stack.clear();
         self.seen_ids.clear();
-        #[cfg(debug_assertions)]
-        {
-            self.has_set_focus = false;
-        }
         let root_node = accesskit::Node::new(accesskit::Role::Window);
 
         self.ids_stack.push(ROOT_NODE_ID);
@@ -269,16 +269,8 @@ impl A11yNodeBuilder {
         id == ROOT_NODE_ID || self.seen_ids.contains(&id)
     }
 
-    /// Set the focused node for this frame.
+    /// Set the focused node for this frame. A second call in one frame wins.
     pub(crate) fn set_focus(&mut self, id: NodeId) {
-        #[cfg(debug_assertions)]
-        {
-            debug_assert!(
-                !self.has_set_focus,
-                "set_focus called more than once in a single frame"
-            );
-            self.has_set_focus = true;
-        }
         self.focus = id;
     }
 
@@ -359,3 +351,7 @@ impl A11yNodeBuilder {
         update
     }
 }
+
+#[cfg(test)]
+#[path = "a11y_tests.rs"]
+mod tests;

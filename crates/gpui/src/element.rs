@@ -472,6 +472,10 @@ impl<E: Element> Drawable<E> {
                             self.element.write_a11y_info(&mut node);
                             window.a11y.node_bounds.insert(node_id, bounds);
                             pushed_a11y_node = window.a11y.nodes.push(node_id, node);
+                            #[cfg(any(test, feature = "test-support"))]
+                            if !pushed_a11y_node {
+                                window.a11y.duplicates.push(global_id.to_string());
+                            }
                         }
                     }
                 }

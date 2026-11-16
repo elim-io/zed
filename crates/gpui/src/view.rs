@@ -158,6 +158,8 @@ impl Element for AnyView {
                         && element_state.cache_key.text_style == text_style
                         && !window.dirty_views.contains(&self.entity_id())
                         && !window.refreshing
+                        // A reused prepaint replays no accessibility nodes.
+                        && !window.a11y.is_active()
                     {
                         let prepaint_start = window.prepaint_index();
                         window.reuse_prepaint(element_state.prepaint_range.clone());
