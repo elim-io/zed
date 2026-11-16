@@ -1919,6 +1919,23 @@ impl Window {
 
     /// Close this window.
     pub fn remove_window(&mut self) {
+        // An AX client may hold a node of this window past its close (VoiceOver's cursor, a client reading again
+        // the node it pressed); macOS's adapter answers such a node's frame through its view's window, which the
+        // close takes away, and aborts the app. The root alone, sent before, leaves no node to ask.
+        #[cfg(not(target_family = "wasm"))]
+        if !self.removed && self.a11y.is_active() {
+            let root = accesskit::TreeUpdate {
+                nodes: vec![(ROOT_NODE_ID, accesskit::Node::new(accesskit::Role::Window))],
+                tree: Some(accesskit::Tree::new(ROOT_NODE_ID)),
+                tree_id: accesskit::TreeId::ROOT,
+                focus: ROOT_NODE_ID,
+            };
+            #[cfg(any(test, feature = "test-support"))]
+            {
+                self.a11y.last_tree = Some(root.clone());
+            }
+            self.platform_window.a11y_tree_update(root);
+        }
         self.removed = true;
     }
 

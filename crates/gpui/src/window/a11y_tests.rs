@@ -167,6 +167,21 @@ fn the_tree_holds_the_setters_and_a_press_calls_the_handler(cx: &mut TestAppCont
     );
 }
 
+#[gpui::test]
+fn a_removed_window_leaves_the_root_alone(cx: &mut TestAppContext) {
+    let pressed = Rc::new(RefCell::new(Pressed::default()));
+    let (_, cx) = cx.add_window_view(|_, _| Controls { pressed });
+    cx.update(|window, _| window.a11y_force_active());
+    cx.run_until_parked();
+    cx.update(|window, _| {
+        assert!(node(window, "save").is_some());
+        window.remove_window();
+        let tree = window.a11y_tree().expect("the tree sent at the close");
+        assert_eq!(tree.nodes.len(), 1, "no node of the closed window is left");
+        assert_eq!(tree.nodes[0].1.role(), Role::Window);
+    });
+}
+
 struct Cached {
     renders: usize,
     child: Entity<CachedChild>,
