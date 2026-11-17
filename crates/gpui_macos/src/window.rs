@@ -1924,15 +1924,24 @@ impl PlatformWindow for MacWindow {
         };
         let action_handler = A11yActionHandler(callbacks.action);
 
-        let adapter = unsafe {
+        let mut adapter = unsafe {
             accesskit_macos::SubclassingAdapter::for_window(
                 lock.native_window as *mut c_void,
                 activation_handler,
                 action_handler,
             )
         };
+        // `open` made the window key before its adapter existed, and the adapter starts as not focused: its
+        // `windowDidBecomeKey` found no adapter, so no node read AXFocused until the window lost and regained key.
+        // Tell it the window's key state now, as the Windows adapter reads the foreground window at its start.
+        let is_key = unsafe { lock.native_window.isKeyWindow() == YES };
+        let events = adapter.update_view_focus_state(is_key);
 
         lock.accesskit_adapter = Some(adapter);
+        drop(lock);
+        if let Some(events) = events {
+            events.raise();
+        }
     }
 
     fn a11y_tree_update(&self, tree_update: accesskit::TreeUpdate) {
