@@ -1219,6 +1219,10 @@ impl Drop for MacWindow {
         let window = this.native_window;
         let sheet_parent = this.sheet_parent.take();
         this.display_link.take();
+        // The accessibility adapter holds the view strongly and the view holds this state: dropped here, the view,
+        // its layer, its drawables and the renderer's atlas are freed with the window (they stayed for the
+        // process's life, about 20 MB a closed window).
+        this.accesskit_adapter.take();
         unsafe {
             this.native_window.setDelegate_(nil);
         }
