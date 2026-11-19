@@ -158,7 +158,11 @@ impl MetalRenderer {
         // Support direct-to-display rendering if the window is not transparent
         // https://developer.apple.com/documentation/metal/managing-your-game-window-for-metal-in-macos
         layer.set_opaque(!transparent);
-        layer.set_maximum_drawable_count(3);
+        // Two drawables, not three: a layer keeps every drawable it ever made for as long as it stands, and a burst of
+        // redraws (a scroll, a page change) makes the third, a whole window's frame (9.5 MB at 960 x 620 on a 2x
+        // display) held for the window's life. An interface redraws at the display's rate at most, so one frame on
+        // screen and one being drawn are enough (Ensemble F6 kit-request launcher-ram, item 1).
+        layer.set_maximum_drawable_count(2);
         // Allow texture reading for visual tests (captures screenshots without ScreenCaptureKit)
         #[cfg(any(test, feature = "test-support"))]
         layer.set_framebuffer_only(false);
