@@ -3972,7 +3972,8 @@ impl ScrollHandle {
             crate::ScrollPhase::None,
             std::time::Instant::now(),
         ) {
-            window.refresh();
+            // through the next frame: a refresh alone leaves a paused display link asleep
+            window.on_next_frame(|window, _| window.refresh());
         }
     }
 
