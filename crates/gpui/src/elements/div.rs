@@ -3956,6 +3956,26 @@ impl ScrollHandle {
         state.scroll_to_bottom = true;
     }
 
+    /// Moves the area by `delta` as a wheel's notch does: the offset glides to its target (a page key's move, the
+    /// kit's scroll area). The target stays inside the content.
+    pub fn glide_by(&self, delta: Point<Pixels>, window: &mut Window) {
+        let state = self.0.borrow();
+        let key = Rc::as_ptr(&state.offset) as usize;
+        let mut offset = state.offset.borrow_mut();
+        if window.scroll_router.apply(
+            key,
+            &mut offset,
+            state.max_offset,
+            state.bounds.size,
+            delta,
+            true,
+            crate::ScrollPhase::None,
+            std::time::Instant::now(),
+        ) {
+            window.refresh();
+        }
+    }
+
     /// Set the offset explicitly. The offset is the distance from the top left of the
     /// parent container to the top left of the first child.
     /// As you scroll further down the offset becomes more negative.

@@ -149,3 +149,33 @@ fn a_stretched_uniform_list_lays_out_from_the_clamped_offset(cx: &mut TestAppCon
     assert_eq!(base.offset().y, px(0.));
     assert!(base.overscroll().y > px(20.), "{:?}", base.overscroll());
 }
+
+#[gpui::test]
+fn a_page_key_glides_by_the_handle(cx: &mut TestAppContext) {
+    let cx = cx.add_empty_window();
+    let (page, list) = (ScrollHandle::new(), ScrollHandle::new());
+    let view = cx.update(|_, cx| {
+        cx.new(|_| Nested {
+            page: page.clone(),
+            list: list.clone(),
+        })
+    });
+    let draw = |cx: &mut gpui::VisualTestContext| {
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, _| {
+            view.clone().into_any_element()
+        });
+    };
+    draw(cx);
+    cx.update(|window, _| page.glide_by(point(px(0.), px(-160.)), window));
+    draw(cx);
+    assert!(page.offset().y > px(-160.));
+    std::thread::sleep(Duration::from_millis(200));
+    draw(cx);
+    assert_eq!(page.offset().y, px(-160.));
+    // A glide past the end rests at the end.
+    cx.update(|window, _| page.glide_by(point(px(0.), px(-5000.)), window));
+    std::thread::sleep(Duration::from_millis(200));
+    draw(cx);
+    draw(cx);
+    assert_eq!(page.offset().y, px(-800.));
+}
