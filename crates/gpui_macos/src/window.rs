@@ -85,6 +85,52 @@ const LINK_STALL: Duration = Duration::from_millis(100);
 
 const WINDOW_STATE_IVAR: &str = "windowState";
 
+/// Core Animation's `CAFrameRateRange`.
+#[repr(C)]
+struct FrameRateRange {
+    minimum: f32,
+    maximum: f32,
+    preferred: f32,
+}
+
+unsafe impl objc::Encode for FrameRateRange {
+    fn encode() -> objc::Encoding {
+        unsafe { objc::Encoding::from_str("{CAFrameRateRange=fff}") }
+    }
+}
+
+const RATE_KEY: &str = "gpui.rate";
+
+/// Asks the display for its full rate while the window's frames are busy, and lets it go when they rest. A ProMotion
+/// display paces a layer that asks for no rate at 60 Hz unless input flows into its window, and CVDisplayLink cannot
+/// ask: an animation no input drives (a spinner, a glide's tail, a fade) was drawn 120 times a second and shown about
+/// 66 (Ensemble ADR-0159). The request is a Core Animation animation of no visible change with a preferred range.
+fn ask_rate(layer: id, on: bool) {
+    if layer.is_null() {
+        return;
+    }
+    unsafe {
+        let key = ns_string(RATE_KEY);
+        if !on {
+            let _: () = msg_send![layer, removeAnimationForKey: key];
+            return;
+        }
+        let animation: id =
+            msg_send![class!(CABasicAnimation), animationWithKeyPath: ns_string("zPosition")];
+        let zero: id = msg_send![class!(NSNumber), numberWithDouble: 0.0f64];
+        let _: () = msg_send![animation, setFromValue: zero];
+        let _: () = msg_send![animation, setToValue: zero];
+        let _: () = msg_send![animation, setDuration: 1.0e9f64];
+        let range = FrameRateRange {
+            minimum: 80.,
+            maximum: 120.,
+            preferred: 120.,
+        };
+        let _: () = msg_send![animation, setPreferredFrameRateRange: range];
+        let _: () = msg_send![layer, addAnimation: animation forKey: key];
+    }
+}
+
 static mut WINDOW_CLASS: *const Class = ptr::null();
 static mut PANEL_CLASS: *const Class = ptr::null();
 static mut VIEW_CLASS: *const Class = ptr::null();
@@ -513,6 +559,8 @@ struct MacWindowState {
     // The display link is stopped (not dropped) after IDLE_PAUSE of idle frames; `frame_waker`
     // starts it again.
     frames_paused: Arc<AtomicBool>,
+    // The display's full rate is asked for (`ask_rate`) while the frames are busy.
+    rate_asked: bool,
     last_busy_frame: Instant,
     // When the display link last delivered a frame, in ms since `frames_epoch` (read by the waker).
     frame_seen: Arc<AtomicU64>,
@@ -694,6 +742,10 @@ impl MacWindowState {
     fn stop_display_link(&mut self) {
         self.display_link = None;
         self.frames_paused.store(false, Ordering::Relaxed);
+        if self.rate_asked {
+            self.rate_asked = false;
+            ask_rate(self.renderer.layer_ptr() as id, false);
+        }
     }
 
     fn frame_idle(&mut self, idle: bool) {
@@ -704,11 +756,17 @@ impl MacWindowState {
         );
         if !idle {
             self.last_busy_frame = now;
+            if !self.rate_asked {
+                self.rate_asked = true;
+                ask_rate(self.renderer.layer_ptr() as id, true);
+            }
         } else if now.duration_since(self.last_busy_frame) >= IDLE_PAUSE
             && let Some(display_link) = self.display_link.as_mut()
             && !self.frames_paused.swap(true, Ordering::Relaxed)
         {
             display_link.stop().log_err();
+            self.rate_asked = false;
+            ask_rate(self.renderer.layer_ptr() as id, false);
         }
     }
 
@@ -939,6 +997,7 @@ impl MacWindow {
                 cursor_visible,
                 display_link: None,
                 frames_paused: Arc::new(AtomicBool::new(false)),
+                rate_asked: false,
                 last_busy_frame: Instant::now(),
                 frame_seen: Arc::new(AtomicU64::new(0)),
                 frames_epoch: Instant::now(),
