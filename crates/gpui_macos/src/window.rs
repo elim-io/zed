@@ -85,33 +85,6 @@ const LINK_STALL: Duration = Duration::from_millis(100);
 
 const WINDOW_STATE_IVAR: &str = "windowState";
 
-/// Looks once, a little past LINK_STALL after a paused link was started again, whether it ticked: one that did not is
-/// replaced as a stalled one is. A resumed link gave the frame request's frame and none of its own, so an animation
-/// begun from a timer in an idle window (an overlay scroll bar's fade) waited about a second for the next waker call.
-fn check_resumed(state: Weak<Mutex<MacWindowState>>, seen: Arc<AtomicU64>, epoch: Instant) {
-    struct Check {
-        state: Weak<Mutex<MacWindowState>>,
-        seen: Arc<AtomicU64>,
-        epoch: Instant,
-    }
-    extern "C" fn run(context: *mut c_void) {
-        // SAFETY: the context is the box made below, run once on the main queue.
-        let check = unsafe { Box::from_raw(context as *mut Check) };
-        let quiet = check.epoch.elapsed().as_millis() as u64
-            > check.seen.load(Ordering::Relaxed) + LINK_STALL.as_millis() as u64;
-        if quiet && let Some(state) = check.state.upgrade() {
-            let mut lock = state.lock();
-            if !lock.frames_paused.load(Ordering::Relaxed) {
-                lock.resume_frames(true);
-            }
-        }
-    }
-    let context = Box::into_raw(Box::new(Check { state, seen, epoch })) as *mut c_void;
-    let when = dispatch2::DispatchTime::NOW.time((LINK_STALL * 3 / 2).as_nanos() as i64);
-    // SAFETY: the main queue runs `run` on the main thread, where the window's state is used.
-    unsafe { DispatchQueue::exec_after_f(when, &DispatchQueue::main(), context, run) };
-}
-
 static mut WINDOW_CLASS: *const Class = ptr::null();
 static mut PANEL_CLASS: *const Class = ptr::null();
 static mut VIEW_CLASS: *const Class = ptr::null();
@@ -1849,9 +1822,6 @@ impl PlatformWindow for MacWindow {
                 && let Some(state) = state.upgrade()
             {
                 state.lock().resume_frames(stalled);
-                if paused && !stalled {
-                    check_resumed(Arc::downgrade(&state), seen.clone(), epoch);
-                }
             }
         }))
     }
