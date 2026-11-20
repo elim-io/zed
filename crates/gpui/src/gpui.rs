@@ -45,6 +45,7 @@ pub mod profiler;
 #[expect(missing_docs)]
 pub mod queue;
 mod scene;
+mod scroll_motion;
 mod shared_uri;
 mod style;
 mod styled;

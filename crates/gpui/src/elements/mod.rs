@@ -23,3 +23,6 @@ pub use surface::*;
 pub use svg::*;
 pub use text::*;
 pub use uniform_list::*;
+
+#[cfg(test)]
+mod scroll_tests;

@@ -10,8 +10,8 @@
 use crate::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, DispatchPhase, Edges, Element, EntityId,
     FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
-    Overflow, Pixels, Point, ScrollDelta, ScrollWheelEvent, Size, Style, StyleRefinement, Styled,
-    Window, point, px, size,
+    Overflow, Pixels, Point, ScrollWheelEvent, Size, Style, StyleRefinement, Styled, Window, point,
+    px, size,
 };
 use collections::VecDeque;
 use refineable::Refineable as _;
@@ -62,6 +62,8 @@ impl std::fmt::Debug for ListState {
 struct StateInner {
     last_layout_bounds: Option<Bounds<Pixels>>,
     last_padding: Option<Edges<Pixels>>,
+    /// The stretch a gesture drew past an edge (paint only), see [`ListState::overscroll`].
+    overscroll: Point<Pixels>,
     items: SumTree<ListItem>,
     logical_scroll_top: Option<ListOffset>,
     alignment: ListAlignment,
@@ -315,6 +317,7 @@ impl ListState {
         let this = Self(Rc::new(RefCell::new(StateInner {
             last_layout_bounds: None,
             last_padding: None,
+            overscroll: Point::default(),
             items: SumTree::default(),
             logical_scroll_top: None,
             alignment,
@@ -516,6 +519,12 @@ impl ListState {
         handler: impl FnMut(&ListScrollEvent, &mut Window, &mut App) + 'static,
     ) {
         self.0.borrow_mut().scroll_handler = Some(Box::new(handler))
+    }
+
+    /// How far a gesture has pulled the items past an edge, drawn but not scrolled (positive past the top,
+    /// negative past the foot, zero at rest); [`Self::logical_scroll_top`] stays inside the items meanwhile.
+    pub fn overscroll(&self) -> Point<Pixels> {
+        self.0.borrow().overscroll
     }
 
     /// Get the current scroll offset, in terms of the list's items.
@@ -922,6 +931,29 @@ impl StateInner {
             })
     }
 
+    /// How far the items can move under an area `height` tall.
+    fn max_top(&self, height: Pixels, padding: Edges<Pixels>) -> Pixels {
+        (self.items.summary().height + padding.top + padding.bottom - height).max(px(0.))
+    }
+
+    /// Moves the top to `top` pixels (a glide's step), as a scroll does.
+    fn set_top(&mut self, top: Pixels, max: Pixels) {
+        let top = top.clamp(px(0.), max);
+        if self.alignment == ListAlignment::Bottom && top == max {
+            self.logical_scroll_top = None;
+            return;
+        }
+        let (start, ..) = self
+            .items
+            .find::<ListItemSummary, _>((), &Height(top), Bias::Right);
+        let scroll_top = ListOffset {
+            item_ix: start.count,
+            offset_in_item: top - start.height,
+        };
+        self.rebase_pending_scroll(scroll_top);
+        self.logical_scroll_top = Some(scroll_top);
+    }
+
     fn scroll_top(&self, logical_scroll_top: &ListOffset) -> Pixels {
         let (start, ..) = self.items.find::<ListItemSummary, _>(
             (),
@@ -1230,6 +1262,7 @@ impl StateInner {
             if bounds.size.height > padding.top + padding.bottom {
                 let mut item_origin = bounds.origin + Point::new(px(0.), padding.top);
                 item_origin.y -= layout_response.scroll_top.offset_in_item;
+                item_origin.y += self.overscroll.y;
                 for item in &mut layout_response.item_layouts {
                     window.with_content_mask(Some(ContentMask { bounds }), |window| {
                         item.element.prepaint_at(item_origin, window, cx);
@@ -1480,6 +1513,24 @@ impl Element for List {
         let padding = style
             .padding
             .to_pixels(bounds.size.into(), window.rem_size());
+
+        // A wheel's glide and a gesture's spring move on at the frame's time (elim-io fork, native-feel 1/5).
+        let key = Rc::as_ptr(&self.state.0) as usize;
+        let max = point(px(0.), state.max_top(bounds.size.height, padding));
+        let top = state.scroll_top(&state.logical_scroll_top());
+        let mut offset = point(px(0.), -top);
+        let (stretch, moving) =
+            window
+                .scroll_router
+                .step(key, &mut offset, max, std::time::Instant::now());
+        if -offset.y != top {
+            state.set_top(-offset.y, max.y);
+        }
+        if moving {
+            window.request_animation_frame();
+        }
+        state.overscroll = stretch;
+
         let layout =
             match state.prepaint_items(bounds, padding, true, &mut self.render_item, window, cx) {
                 Ok(layout) => layout,
@@ -1514,22 +1565,58 @@ impl Element for List {
         });
 
         let list_state = self.state.clone();
-        let height = bounds.size.height;
-        let scroll_top = prepaint.layout.scroll_top;
-        let hitbox_id = prepaint.hitbox.id;
-        let mut accumulated_scroll_delta = ScrollDelta::default();
+        let key = Rc::as_ptr(&self.state.0) as usize;
+        let size = bounds.size;
+        let hitbox = prepaint.hitbox.clone();
         window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
-            if phase == DispatchPhase::Bubble && hitbox_id.should_handle_scroll(window) {
-                accumulated_scroll_delta = accumulated_scroll_delta.coalesce(event.delta);
-                let pixel_delta = accumulated_scroll_delta.pixel_delta(px(20.));
-                list_state.0.borrow_mut().scroll(
-                    &scroll_top,
-                    height,
-                    pixel_delta,
-                    current_view,
-                    window,
-                    cx,
-                )
+            // One gesture, one area (see `scroll_motion`): offer in the capture phase, take in the bubble phase.
+            let hit = hitbox.should_handle_scroll(window);
+            if !hit && !window.scroll_router.is_latched(key) {
+                return;
+            }
+            let state = &mut *list_state.0.borrow_mut();
+            // Drop scroll events after a reset: the item heights are not known.
+            if state.reset {
+                return;
+            }
+            let padding = state.last_padding.unwrap_or_default();
+            let max = point(px(0.), state.max_top(size.height, padding));
+            let top = state.scroll_top(&state.logical_scroll_top());
+            if phase == DispatchPhase::Capture {
+                if hit {
+                    window.scroll_router.offer(crate::scroll_motion::Candidate {
+                        key,
+                        scrolls: point(false, true),
+                        max,
+                        offset: point(px(0.), -top),
+                        both: false,
+                        map_wheel: false,
+                    });
+                }
+                return;
+            }
+            let delta = event.delta.pixel_delta(px(20.));
+            if hit && delta.y > px(0.) {
+                // A scroll toward the start over the list stops following its tail, moved or not.
+                state.follow_state.stop_following();
+            }
+            let Some(delta) = window.scroll_router.take(key, event.scroll_phase, delta) else {
+                return;
+            };
+            let mut offset = point(px(0.), -top);
+            if window.scroll_router.apply(
+                key,
+                &mut offset,
+                max,
+                size,
+                delta,
+                !event.delta.precise(),
+                event.scroll_phase,
+                std::time::Instant::now(),
+            ) {
+                let moved = point(px(0.), offset.y + top);
+                let scroll_top = state.logical_scroll_top();
+                state.scroll(&scroll_top, size.height, moved, current_view, window, cx);
             }
         });
     }

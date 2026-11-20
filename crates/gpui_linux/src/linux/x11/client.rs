@@ -61,8 +61,8 @@ use crate::linux::{LinuxCommon, LinuxKeyboardLayout, X11Window, modifiers_from_x
 use gpui::{
     AnyWindowHandle, Bounds, ClipboardItem, CursorStyle, DisplayId, FileDropEvent, Keystroke,
     Modifiers, ModifiersChangedEvent, MouseButton, Pixels, PlatformDisplay, PlatformInput,
-    PlatformKeyboardLayout, PlatformWindow, Point, RequestFrameOptions, ScrollDelta, Size,
-    TouchPhase, WindowButtonLayout, WindowParams, point, px,
+    PlatformKeyboardLayout, PlatformWindow, Point, RequestFrameOptions, ScrollDelta, ScrollPhase,
+    Size, TouchPhase, WindowButtonLayout, WindowParams, point, px,
 };
 use gpui_wgpu::{CompositorGpuHint, GpuContext};
 
@@ -2484,6 +2484,7 @@ fn make_scroll_wheel_event(
         delta: ScrollDelta::Lines(delta),
         modifiers,
         touch_phase: TouchPhase::default(),
+        scroll_phase: ScrollPhase::None,
     }
 }
 

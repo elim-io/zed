@@ -1029,6 +1029,7 @@ pub struct Window {
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
     pub(crate) rendered_frame: Frame,
+    pub(crate) scroll_router: crate::scroll_motion::ScrollRouter,
     pub(crate) next_frame: Frame,
     next_hitbox_id: HitboxId,
     pub(crate) next_tooltip_id: TooltipId,
@@ -1481,14 +1482,13 @@ impl Window {
 
                 // Throttle frame rate based on conditions:
                 // - Thermal pressure (Serious/Critical): cap to ~60fps
-                // - Inactive window (not focused): cap to ~30fps to save energy
+                // A visible window that is not key draws at the display's rate too (a panel, a pill, a toast animate
+                // there); an occluded one stops its display link (elim-io fork, native-feel 1/5).
                 let min_frame_interval = if !request_frame_options.force_render
                     && !request_frame_options.require_presentation
                     && next_frame_callbacks.borrow().is_empty()
                 {
                     None
-                } else if !active.get() {
-                    Some(Duration::from_micros(33333))
                 } else if let Some(ThermalState::Critical | ThermalState::Serious) = thermal_state {
                     Some(Duration::from_micros(16667))
                 } else {
@@ -1753,6 +1753,7 @@ impl Window {
             default_prevented: true,
             mouse_position,
             mouse_hit_test: HitTest::default(),
+            scroll_router: Default::default(),
             modifiers,
             capslock,
             scale_factor,
@@ -4710,6 +4711,10 @@ impl Window {
             self.handle_inspector_mouse_event(event, cx);
             // When inspector is picking, all other mouse handling is skipped.
             return;
+        }
+
+        if event.is::<crate::ScrollWheelEvent>() {
+            self.scroll_router.begin_event();
         }
 
         let mut mouse_listeners = mem::take(&mut self.rendered_frame.mouse_listeners);

@@ -2,7 +2,7 @@ use gpui::{
     Capslock, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton,
     MouseDownEvent, MouseExitEvent, MouseMoveEvent, MousePressureEvent, MouseUpEvent,
     NavigationDirection, PinchEvent, Pixels, PlatformInput, PressureStage, ScrollDelta,
-    ScrollWheelEvent, TouchPhase, point, px,
+    ScrollPhase, ScrollWheelEvent, TouchPhase, point, px,
 };
 
 use crate::{
@@ -275,6 +275,27 @@ pub(crate) unsafe fn platform_input_from_native(
                     ScrollDelta::Lines(raw_data)
                 };
 
+                // AppKit's two phases: a gesture's own, and the momentum the system sends after the fingers lift.
+                let scroll_phase = match (native_event.phase(), native_event.momentumPhase()) {
+                    (NSEventPhase::NSEventPhaseMayBegin, _) => ScrollPhase::MayBegin,
+                    (NSEventPhase::NSEventPhaseBegan, _) => ScrollPhase::Began,
+                    (NSEventPhase::NSEventPhaseEnded, _) => ScrollPhase::Ended,
+                    (NSEventPhase::NSEventPhaseCancelled, _) => ScrollPhase::Cancelled,
+                    (
+                        NSEventPhase::NSEventPhaseChanged | NSEventPhase::NSEventPhaseStationary,
+                        _,
+                    ) => ScrollPhase::Changed,
+                    (_, NSEventPhase::NSEventPhaseBegan) => ScrollPhase::MomentumBegan,
+                    (_, NSEventPhase::NSEventPhaseEnded | NSEventPhase::NSEventPhaseCancelled) => {
+                        ScrollPhase::MomentumEnded
+                    }
+                    (
+                        _,
+                        NSEventPhase::NSEventPhaseChanged | NSEventPhase::NSEventPhaseStationary,
+                    ) => ScrollPhase::Momentum,
+                    _ => ScrollPhase::None,
+                };
+
                 PlatformInput::ScrollWheel(ScrollWheelEvent {
                     position: point(
                         px(native_event.locationInWindow().x as f32),
@@ -282,6 +303,7 @@ pub(crate) unsafe fn platform_input_from_native(
                     ),
                     delta,
                     touch_phase: phase,
+                    scroll_phase,
                     modifiers: read_modifiers(native_event),
                 })
             }),

@@ -4,7 +4,7 @@ use gpui::{
     Capslock, DispatchEventResult, ExternalPaths, FileDropEvent, KeyDownEvent, KeyUpEvent,
     Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent,
     MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, PlatformInput, Point, ScrollDelta,
-    ScrollWheelEvent, TouchPhase, point, px,
+    ScrollPhase, ScrollWheelEvent, TouchPhase, point, px,
 };
 use smallvec::smallvec;
 use wasm_bindgen::prelude::*;
@@ -265,6 +265,7 @@ impl WebWindowInner {
                 delta,
                 modifiers,
                 touch_phase: TouchPhase::Moved,
+                scroll_phase: ScrollPhase::None,
             }));
         })
     }

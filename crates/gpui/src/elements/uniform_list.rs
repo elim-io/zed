@@ -386,6 +386,8 @@ impl Element for UniformList {
             window,
             cx,
             |_style, mut scroll_offset, hitbox, window, cx| {
+                // The stretch past an edge is drawn as a shift of the rows laid out from the clamped offset.
+                let overscroll = std::mem::take(&mut window.scroll_router.overscroll);
                 let y_flipped = if let Some(scroll_handle) = &self.scroll_handle {
                     let scroll_state = scroll_handle.0.borrow();
                     scroll_state.y_flipped
@@ -494,6 +496,7 @@ impl Element for UniformList {
                         for (mut item, ix) in items.into_iter().zip(visible_range.clone()) {
                             let item_origin = padded_bounds.origin
                                 + scroll_offset
+                                + overscroll
                                 + point(Pixels::ZERO, item_height * ix);
 
                             let available_width = if can_scroll_horizontally {

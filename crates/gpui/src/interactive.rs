@@ -437,6 +437,49 @@ pub struct ScrollWheelEvent {
 
     /// The phase of the touch event.
     pub touch_phase: TouchPhase,
+
+    /// Where the event stands in a trackpad gesture and its momentum ([`ScrollPhase::None`]: a wheel's notch, or a
+    /// device that sends no phases). The window latches a gesture and its momentum to one scroll area by it.
+    pub scroll_phase: ScrollPhase,
+}
+
+/// A scroll event's place in a gesture (AppKit's `phase` and `momentumPhase` together).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScrollPhase {
+    /// Not part of a gesture: a wheel's notch, a device with no phases.
+    #[default]
+    None,
+    /// Fingers touched the trackpad and may start a gesture (they stop a spring or a glide).
+    MayBegin,
+    /// A gesture began.
+    Began,
+    /// A gesture moved.
+    Changed,
+    /// The fingers lifted.
+    Ended,
+    /// The gesture was cancelled.
+    Cancelled,
+    /// The system's momentum after the fingers lifted began.
+    MomentumBegan,
+    /// The system's momentum moved.
+    Momentum,
+    /// The system's momentum ended.
+    MomentumEnded,
+}
+
+impl ScrollPhase {
+    /// The event is the system's momentum.
+    pub fn is_momentum(self) -> bool {
+        matches!(
+            self,
+            ScrollPhase::MomentumBegan | ScrollPhase::Momentum | ScrollPhase::MomentumEnded
+        )
+    }
+
+    /// The event belongs to a trackpad gesture or its momentum.
+    pub fn is_phased(self) -> bool {
+        self != ScrollPhase::None
+    }
 }
 
 impl Sealed for ScrollWheelEvent {}

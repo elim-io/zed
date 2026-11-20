@@ -19,7 +19,7 @@ use crate::PinchEvent;
 use crate::{
     Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, Bounds, ClickEvent, DispatchPhase,
     Display, Element, ElementId, Entity, EntityId, FocusHandle, Global, GlobalElementId, Hitbox,
-    HitboxBehavior, HitboxId, InspectorElementId, IntoElement, IsZero, KeyContext, KeyDownEvent,
+    HitboxBehavior, HitboxId, InspectorElementId, IntoElement, KeyContext, KeyDownEvent,
     KeyUpEvent, KeyboardButton, KeyboardClickEvent, LayoutId, ModifiersChangedEvent, MouseButton,
     MouseClickEvent, MouseDownEvent, MouseMoveEvent, MousePressureEvent, MouseUpEvent, Overflow,
     ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Style,
@@ -1766,6 +1766,8 @@ impl Element for Div {
                     return hitbox;
                 }
 
+                // The stretch past an edge is paint only: the offset stays inside the content.
+                let scroll_offset = scroll_offset + mem::take(&mut window.scroll_router.overscroll);
                 window.with_image_cache(image_cache, |window| {
                     window.with_element_offset(scroll_offset, |window| {
                         if let Some(order_fn) = &self.prepaint_order_fn {
@@ -1852,6 +1854,8 @@ pub struct Interactivity {
     pub hovered: Option<bool>,
     pub(crate) tooltip_id: Option<TooltipId>,
     pub(crate) content_size: Size<Pixels>,
+    /// How far the content can move, set at prepaint for the scroll listener.
+    pub(crate) scroll_max: std::cell::Cell<Point<Pixels>>,
     pub(crate) key_context: Option<KeyContext>,
     pub(crate) focusable: bool,
     pub(crate) tracked_focus_handle: Option<FocusHandle>,
@@ -2164,7 +2168,21 @@ impl Interactivity {
                 .max(&Default::default());
             // Clamp scroll offset in case scroll max is smaller now (e.g., if children
             // were removed or the bounds became larger).
+            let key = Rc::as_ptr(scroll_offset) as usize;
             let mut scroll_offset = scroll_offset.borrow_mut();
+
+            // A wheel's glide and a gesture's spring move on at the frame's time; a programme's move cancels them.
+            let (stretch, moving) = window.scroll_router.step(
+                key,
+                &mut scroll_offset,
+                scroll_max,
+                std::time::Instant::now(),
+            );
+            if moving {
+                window.request_animation_frame();
+            }
+            window.scroll_router.overscroll = stretch;
+            self.scroll_max.set(scroll_max);
 
             scroll_offset.x = scroll_offset.x.clamp(-scroll_max.x, px(0.));
             if scroll_to_bottom {
@@ -2176,10 +2194,12 @@ impl Interactivity {
             if let Some(mut scroll_handle_state) = tracked_scroll_handle {
                 scroll_handle_state.max_offset = scroll_max;
                 scroll_handle_state.bounds = bounds;
+                scroll_handle_state.overscroll = stretch;
             }
 
             *scroll_offset
         } else {
+            window.scroll_router.overscroll = Point::default();
             Point::default()
         }
     }
@@ -2302,9 +2322,8 @@ impl Interactivity {
                                                 for (action, listener) in
                                                     self.a11y_action_listeners.drain(..)
                                                 {
-                                                    window.on_a11y_action(
-                                                        node_id, action, listener,
-                                                    );
+                                                    window
+                                                        .on_a11y_action(node_id, action, listener);
                                                 }
                                                 if let Some(listeners) = a11y_press.take() {
                                                     window.on_a11y_action(
@@ -2948,45 +2967,54 @@ impl Interactivity {
     ) {
         if let Some(scroll_offset) = self.scroll_offset.clone() {
             let overflow = style.overflow;
-            let allow_concurrent_scroll = style.allow_concurrent_scroll;
-            let restrict_scroll_to_axis = style.restrict_scroll_to_axis;
+            let candidate = crate::scroll_motion::Candidate {
+                key: Rc::as_ptr(&scroll_offset) as usize,
+                scrolls: point(
+                    overflow.x == Overflow::Scroll,
+                    overflow.y == Overflow::Scroll,
+                ),
+                max: self.scroll_max.get(),
+                offset: Point::default(),
+                both: style.allow_concurrent_scroll,
+                map_wheel: !style.restrict_scroll_to_axis,
+            };
             let line_height = window.line_height();
             let hitbox = hitbox.clone();
             let current_view = window.current_view();
             window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
-                if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
-                    let mut scroll_offset = scroll_offset.borrow_mut();
-                    let old_scroll_offset = *scroll_offset;
-                    let delta = event.delta.pixel_delta(line_height);
-
-                    let mut delta_x = Pixels::ZERO;
-                    if overflow.x == Overflow::Scroll {
-                        if !delta.x.is_zero() {
-                            delta_x = delta.x;
-                        } else if !restrict_scroll_to_axis && overflow.y != Overflow::Scroll {
-                            delta_x = delta.y;
-                        }
+                // One gesture, one area: every area under the pointer offers itself (outermost first), and the
+                // window's router gives the event to one of them (the latched one wherever the pointer is now).
+                let key = candidate.key;
+                let hit = hitbox.should_handle_scroll(window);
+                if phase == DispatchPhase::Capture {
+                    if hit {
+                        let offset = *scroll_offset.borrow();
+                        window.scroll_router.offer(crate::scroll_motion::Candidate {
+                            offset,
+                            ..candidate
+                        });
                     }
-                    let mut delta_y = Pixels::ZERO;
-                    if overflow.y == Overflow::Scroll {
-                        if !delta.y.is_zero() {
-                            delta_y = delta.y;
-                        } else if !restrict_scroll_to_axis && overflow.x != Overflow::Scroll {
-                            delta_y = delta.x;
-                        }
-                    }
-                    if !allow_concurrent_scroll && !delta_x.is_zero() && !delta_y.is_zero() {
-                        if delta_x.abs() > delta_y.abs() {
-                            delta_y = Pixels::ZERO;
-                        } else {
-                            delta_x = Pixels::ZERO;
-                        }
-                    }
-                    scroll_offset.y += delta_y;
-                    scroll_offset.x += delta_x;
-                    if *scroll_offset != old_scroll_offset {
-                        cx.notify(current_view);
-                    }
+                    return;
+                }
+                if !hit && !window.scroll_router.is_latched(key) {
+                    return;
+                }
+                let delta = event.delta.pixel_delta(line_height);
+                let Some(delta) = window.scroll_router.take(key, event.scroll_phase, delta) else {
+                    return;
+                };
+                let mut offset = scroll_offset.borrow_mut();
+                if window.scroll_router.apply(
+                    key,
+                    &mut offset,
+                    candidate.max,
+                    hitbox.bounds.size,
+                    delta,
+                    !event.delta.precise(),
+                    event.scroll_phase,
+                    std::time::Instant::now(),
+                ) {
+                    cx.notify(current_view);
                 }
             });
         }
@@ -3754,6 +3782,7 @@ struct ScrollHandleState {
     scroll_to_bottom: bool,
     overflow: Point<Overflow>,
     active_item: Option<ScrollActiveItem>,
+    overscroll: Point<Pixels>,
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -3790,6 +3819,12 @@ impl ScrollHandle {
     /// Get the current scroll offset.
     pub fn offset(&self) -> Point<Pixels> {
         *self.0.borrow().offset.borrow()
+    }
+
+    /// How far a gesture has pulled the content past an edge, drawn but not scrolled: positive past the start,
+    /// negative past the end, zero at rest. [`Self::offset`] stays inside the content meanwhile.
+    pub fn overscroll(&self) -> Point<Pixels> {
+        self.0.borrow().overscroll
     }
 
     /// Get the maximum scroll offset.
