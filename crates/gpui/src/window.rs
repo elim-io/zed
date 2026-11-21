@@ -4516,13 +4516,19 @@ impl Window {
     }
 
     fn reset_cursor_style(&self, cx: &mut App) {
-        // Set the cursor only if we're the active window.
+        // Set the cursor only if we're the active window, or a floating window under the pointer that is not key.
         if self.is_window_hovered() {
             let style = self
                 .rendered_frame
                 .cursor_style(self)
                 .unwrap_or(CursorStyle::Arrow);
             cx.platform.set_cursor_style(style);
+        } else {
+            let style = self
+                .rendered_frame
+                .cursor_style(self)
+                .unwrap_or(CursorStyle::Arrow);
+            self.platform_window.set_cursor_style_unfocused(style);
         }
     }
 

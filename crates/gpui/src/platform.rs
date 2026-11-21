@@ -641,6 +641,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn activate(&self);
     fn is_active(&self) -> bool;
     fn is_hovered(&self) -> bool;
+    /// Shows `style` at once when this window is a floating one that is not key and the pointer is over it (AppKit
+    /// consults cursor rects only for the active app's key window, so a panel of an app that is not active showed the
+    /// arrow): true when it did. Nothing elsewhere.
+    fn set_cursor_style_unfocused(&self, _style: CursorStyle) -> bool {
+        false
+    }
     fn background_appearance(&self) -> WindowBackgroundAppearance;
     fn set_title(&mut self, title: &str);
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance);

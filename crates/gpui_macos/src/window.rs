@@ -1532,6 +1532,37 @@ impl PlatformWindow for MacWindow {
         false
     }
 
+    fn set_cursor_style_unfocused(&self, style: CursorStyle) -> bool {
+        // SAFETY: gpui calls this on the main thread; the window and its state live while `self` does.
+        unsafe {
+            let window = self.0.lock().native_window;
+            let panel: BOOL = msg_send![window, isKindOfClass: class!(NSPanel)];
+            if panel == NO || window.isKeyWindow() == YES {
+                return false;
+            }
+            // only while this window is the one under the pointer
+            let at: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+            let under: NSInteger = msg_send![
+                class!(NSWindow),
+                windowNumberAtPoint: at
+                belowWindowWithWindowNumber: 0 as NSInteger
+            ];
+            let own: NSInteger = msg_send![window, windowNumber];
+            if under != own {
+                return false;
+            }
+            self.0.lock().cursor_style = style;
+            let app = NSApplication::sharedApplication(nil);
+            let active: BOOL = msg_send![app, isActive];
+            if active == NO {
+                sets_cursor_in_background();
+            }
+            let cursor = ns_cursor(style);
+            let _: () = msg_send![cursor, set];
+            true
+        }
+    }
+
     fn set_title(&mut self, title: &str) {
         unsafe {
             let app = NSApplication::sharedApplication(nil);
@@ -2108,17 +2139,44 @@ unsafe fn symbol_cursor(cell: &std::sync::OnceLock<usize>, name: &str, hot: (f64
     }
 }
 
-extern "C" fn reset_cursor_rects(this: &Object, _: Sel) {
-    // SAFETY: AppKit invokes cursor-rect updates on the main thread for GPUIView instances,
-    // whose WINDOW_STATE_IVAR is initialized when the view is created. The cursor registered
-    // below is a valid NSCursor.
+/// The window server lets this process set the pointer while another app is active (the connection's
+/// `SetsCursorInBackground`, as a floating panel's owner does): once, at the first such set.
+fn sets_cursor_in_background() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        use core_foundation::base::TCFType as _;
+        let key = core_foundation::string::CFString::from_static_string("SetsCursorInBackground");
+        // SAFETY: the default connection is this process's own; the key and the value live through the call.
+        unsafe {
+            let cid = _CGSDefaultConnection();
+            CGSSetConnectionProperty(
+                cid,
+                cid,
+                key.as_concrete_TypeRef(),
+                core_foundation_sys::number::kCFBooleanTrue as CFTypeRef,
+            );
+        }
+    });
+}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn _CGSDefaultConnection() -> i32;
+    fn CGSSetConnectionProperty(
+        cid: i32,
+        target: i32,
+        key: core_foundation_sys::string::CFStringRef,
+        value: CFTypeRef,
+    ) -> i32;
+}
+
+/// The NSCursor of a style.
+///
+/// # Safety
+/// AppKit's main thread.
+unsafe fn ns_cursor(cursor_style: CursorStyle) -> id {
     unsafe {
-        let _: () = msg_send![super(this, class!(NSView)), resetCursorRects];
-
-        let window_state = get_window_state(this);
-        let cursor_style = window_state.lock().cursor_style;
-
-        let cursor: id = match cursor_style {
+        match cursor_style {
             CursorStyle::Arrow => msg_send![class!(NSCursor), arrowCursor],
             CursorStyle::IBeam => msg_send![class!(NSCursor), IBeamCursor],
             CursorStyle::Crosshair => msg_send![class!(NSCursor), crosshairCursor],
@@ -2155,14 +2213,32 @@ extern "C" fn reset_cursor_rects(this: &Object, _: Sel) {
             // AppKit has no public four arrows (its private `_moveCursor` raises on macOS 27): the SF Symbol, as the pen
             CursorStyle::Move => {
                 static MOVE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-                symbol_cursor(&MOVE, "arrow.up.and.down.and.arrow.left.and.right", (12.0, 12.0))
+                symbol_cursor(
+                    &MOVE,
+                    "arrow.up.and.down.and.arrow.left.and.right",
+                    (12.0, 12.0),
+                )
             }
             CursorStyle::Pen => {
                 static PEN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
                 // the pencil's tip at the drawing's bottom left
                 symbol_cursor(&PEN, "pencil", (4.0, 20.0))
             }
-        };
+        }
+    }
+}
+
+extern "C" fn reset_cursor_rects(this: &Object, _: Sel) {
+    // SAFETY: AppKit invokes cursor-rect updates on the main thread for GPUIView instances,
+    // whose WINDOW_STATE_IVAR is initialized when the view is created. The cursor registered
+    // below is a valid NSCursor.
+    unsafe {
+        let _: () = msg_send![super(this, class!(NSView)), resetCursorRects];
+
+        let window_state = get_window_state(this);
+        let cursor_style = window_state.lock().cursor_style;
+
+        let cursor = ns_cursor(cursor_style);
 
         let bounds = NSView::bounds(this as *const Object as id);
         let _: () = msg_send![this, addCursorRect: bounds cursor: cursor];
