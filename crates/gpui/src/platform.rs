@@ -1918,6 +1918,14 @@ pub enum CursorStyle {
     /// A cursor indicating that the operation will result in a context menu
     /// corresponds to the CSS cursor value `context-menu`
     ContextualMenu,
+
+    /// A cursor over a thing a press would move: four arrows
+    /// corresponds to the CSS cursor value `move`
+    Move,
+
+    /// A cursor over a canvas a press draws on freehand: a pen, its tip the hot spot
+    /// (no CSS value: `crosshair` where the system has no pen)
+    Pen,
 }
 
 /// A clipboard item that should be copied to the clipboard

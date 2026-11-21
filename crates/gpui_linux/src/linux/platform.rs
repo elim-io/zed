@@ -816,6 +816,8 @@ pub(super) fn cursor_style_to_icon_names(style: CursorStyle) -> &'static [&'stat
         CursorStyle::ResizeColumn => &["col-resize", "sb_h_double_arrow"],
         CursorStyle::ResizeRow => &["row-resize", "sb_v_double_arrow"],
         CursorStyle::IBeamCursorForVerticalLayout => &["vertical-text"],
+        CursorStyle::Move => &["move", "fleur"],
+        CursorStyle::Pen => &["pencil", "crosshair", "cross"],
         CursorStyle::OperationNotAllowed => &["not-allowed", "crossed_circle"],
         CursorStyle::DragLink => &["alias"],
         CursorStyle::DragCopy => &["copy"],

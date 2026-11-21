@@ -2061,6 +2061,54 @@ extern "C" fn dealloc_view(this: &Object, _: Sel) {
     }
 }
 
+/// The pen: AppKit has none, so the SF Symbol `pencil` in black over its white outline (the system cursors' make), its
+/// tip at the bottom left the hot spot; made once.
+unsafe fn pen_cursor() -> id {
+    static PEN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let made = *PEN.get_or_init(|| unsafe {
+        let symbol: id = msg_send![class!(NSImage), imageWithSystemSymbolName: ns_string("pencil") accessibilityDescription: nil];
+        if symbol == nil {
+            return 0;
+        }
+        let tinted = |color: id| -> id {
+            let colors: id = msg_send![class!(NSArray), arrayWithObject: color];
+            let palette: id = msg_send![class!(NSImageSymbolConfiguration), configurationWithPaletteColors: colors];
+            // 16 pt, semibold (NSFontWeightSemibold 0.3), the medium scale (2)
+            let weight: id = msg_send![class!(NSImageSymbolConfiguration), configurationWithPointSize: 16.0f64 weight: 0.3f64 scale: 2isize];
+            let both: id = msg_send![weight, configurationByApplyingConfiguration: palette];
+            msg_send![symbol, imageWithSymbolConfiguration: both]
+        };
+        let white = tinted(msg_send![class!(NSColor), whiteColor]);
+        let black = tinted(msg_send![class!(NSColor), blackColor]);
+        if white == nil || black == nil {
+            return 0;
+        }
+        let side = 24.0;
+        let image: id = msg_send![class!(NSImage), alloc];
+        let image: id = msg_send![image, initWithSize: NSSize::new(side, side)];
+        let place = NSRect::new(NSPoint::new(3.0, 3.0), NSSize::new(side - 6.0, side - 6.0));
+        let zero = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0));
+        // NSCompositingOperationSourceOver
+        let over: NSUInteger = 2;
+        let _: () = msg_send![image, lockFocus];
+        for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0), (-1.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (1.0, -1.0)] {
+            let at = NSRect::new(NSPoint::new(place.origin.x + dx, place.origin.y + dy), place.size);
+            let _: () = msg_send![white, drawInRect: at fromRect: zero operation: over fraction: 1.0f64];
+        }
+        let _: () = msg_send![black, drawInRect: place fromRect: zero operation: over fraction: 1.0f64];
+        let _: () = msg_send![image, unlockFocus];
+        // the hot spot counts from the top left: the pencil's tip stands at the drawing's bottom left
+        let cursor: id = msg_send![class!(NSCursor), alloc];
+        let cursor: id = msg_send![cursor, initWithImage: image hotSpot: NSPoint::new(4.0, side - 4.0)];
+        cursor as usize
+    });
+    if made == 0 {
+        unsafe { msg_send![class!(NSCursor), crosshairCursor] }
+    } else {
+        made as id
+    }
+}
+
 extern "C" fn reset_cursor_rects(this: &Object, _: Sel) {
     // SAFETY: AppKit invokes cursor-rect updates on the main thread for GPUIView instances,
     // whose WINDOW_STATE_IVAR is initialized when the view is created. The cursor registered
@@ -2105,6 +2153,17 @@ extern "C" fn reset_cursor_rects(this: &Object, _: Sel) {
             CursorStyle::DragLink => msg_send![class!(NSCursor), dragLinkCursor],
             CursorStyle::DragCopy => msg_send![class!(NSCursor), dragCopyCursor],
             CursorStyle::ContextualMenu => msg_send![class!(NSCursor), contextualMenuCursor],
+            // Undocumented, as the window resize cursors above: the system's four arrows (Preview, Keynote)
+            CursorStyle::Move => {
+                let moves: BOOL =
+                    msg_send![class!(NSCursor), respondsToSelector: sel!(_moveCursor)];
+                if moves == YES {
+                    msg_send![class!(NSCursor), _moveCursor]
+                } else {
+                    msg_send![class!(NSCursor), openHandCursor]
+                }
+            }
+            CursorStyle::Pen => pen_cursor(),
         };
 
         let bounds = NSView::bounds(this as *const Object as id);

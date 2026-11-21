@@ -303,6 +303,8 @@ impl Platform for WebPlatform {
             CursorStyle::ResizeColumn => "col-resize",
             CursorStyle::ResizeRow => "row-resize",
             CursorStyle::IBeamCursorForVerticalLayout => "vertical-text",
+            CursorStyle::Move => "move",
+            CursorStyle::Pen => "crosshair",
             CursorStyle::OperationNotAllowed => "not-allowed",
             CursorStyle::DragLink => "alias",
             CursorStyle::DragCopy => "copy",

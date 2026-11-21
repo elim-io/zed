@@ -33,6 +33,8 @@ pub(super) fn to_shape(style: CursorStyle) -> Shape {
         CursorStyle::ResizeColumn => Shape::ColResize,
         CursorStyle::ResizeRow => Shape::RowResize,
         CursorStyle::IBeamCursorForVerticalLayout => Shape::VerticalText,
+        CursorStyle::Move => Shape::Move,
+        CursorStyle::Pen => Shape::Crosshair,
         CursorStyle::OperationNotAllowed => Shape::NotAllowed,
         CursorStyle::DragLink => Shape::Alias,
         CursorStyle::DragCopy => Shape::Copy,
