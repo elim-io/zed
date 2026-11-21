@@ -2061,20 +2061,20 @@ extern "C" fn dealloc_view(this: &Object, _: Sel) {
     }
 }
 
-/// The pen: AppKit has none, so the SF Symbol `pencil` in black over its white outline (the system cursors' make), its
-/// tip at the bottom left the hot spot; made once.
-unsafe fn pen_cursor() -> id {
-    static PEN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    let made = *PEN.get_or_init(|| unsafe {
-        let symbol: id = msg_send![class!(NSImage), imageWithSystemSymbolName: ns_string("pencil") accessibilityDescription: nil];
+/// A cursor AppKit has none of (the pen, the four arrows of a move): the SF Symbol `name` in black over its white
+/// outline (the system cursors' make) on a 24 square, `hot` its hot spot from the top left; made once into `cell`, the
+/// crosshair when the symbol is missing.
+unsafe fn symbol_cursor(cell: &std::sync::OnceLock<usize>, name: &str, hot: (f64, f64)) -> id {
+    let made = *cell.get_or_init(|| unsafe {
+        let symbol: id = msg_send![class!(NSImage), imageWithSystemSymbolName: ns_string(name) accessibilityDescription: nil];
         if symbol == nil {
             return 0;
         }
         let tinted = |color: id| -> id {
             let colors: id = msg_send![class!(NSArray), arrayWithObject: color];
             let palette: id = msg_send![class!(NSImageSymbolConfiguration), configurationWithPaletteColors: colors];
-            // 16 pt, semibold (NSFontWeightSemibold 0.3), the medium scale (2)
-            let weight: id = msg_send![class!(NSImageSymbolConfiguration), configurationWithPointSize: 16.0f64 weight: 0.3f64 scale: 2isize];
+            // 15 pt, semibold (NSFontWeightSemibold 0.3), the medium scale (2)
+            let weight: id = msg_send![class!(NSImageSymbolConfiguration), configurationWithPointSize: 15.0f64 weight: 0.3f64 scale: 2isize];
             let both: id = msg_send![weight, configurationByApplyingConfiguration: palette];
             msg_send![symbol, imageWithSymbolConfiguration: both]
         };
@@ -2097,9 +2097,8 @@ unsafe fn pen_cursor() -> id {
         }
         let _: () = msg_send![black, drawInRect: place fromRect: zero operation: over fraction: 1.0f64];
         let _: () = msg_send![image, unlockFocus];
-        // the hot spot counts from the top left: the pencil's tip stands at the drawing's bottom left
         let cursor: id = msg_send![class!(NSCursor), alloc];
-        let cursor: id = msg_send![cursor, initWithImage: image hotSpot: NSPoint::new(4.0, side - 4.0)];
+        let cursor: id = msg_send![cursor, initWithImage: image hotSpot: NSPoint::new(hot.0, hot.1)];
         cursor as usize
     });
     if made == 0 {
@@ -2153,17 +2152,16 @@ extern "C" fn reset_cursor_rects(this: &Object, _: Sel) {
             CursorStyle::DragLink => msg_send![class!(NSCursor), dragLinkCursor],
             CursorStyle::DragCopy => msg_send![class!(NSCursor), dragCopyCursor],
             CursorStyle::ContextualMenu => msg_send![class!(NSCursor), contextualMenuCursor],
-            // Undocumented, as the window resize cursors above: the system's four arrows (Preview, Keynote)
+            // AppKit has no public four arrows (its private `_moveCursor` raises on macOS 27): the SF Symbol, as the pen
             CursorStyle::Move => {
-                let moves: BOOL =
-                    msg_send![class!(NSCursor), respondsToSelector: sel!(_moveCursor)];
-                if moves == YES {
-                    msg_send![class!(NSCursor), _moveCursor]
-                } else {
-                    msg_send![class!(NSCursor), openHandCursor]
-                }
+                static MOVE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+                symbol_cursor(&MOVE, "arrow.up.and.down.and.arrow.left.and.right", (12.0, 12.0))
             }
-            CursorStyle::Pen => pen_cursor(),
+            CursorStyle::Pen => {
+                static PEN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+                // the pencil's tip at the drawing's bottom left
+                symbol_cursor(&PEN, "pencil", (4.0, 20.0))
+            }
         };
 
         let bounds = NSView::bounds(this as *const Object as id);
