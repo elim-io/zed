@@ -101,7 +101,6 @@ pub(crate) fn load_cursor(style: CursorStyle) -> Option<HCURSOR> {
     static SIZENESW: OnceLock<SafeCursor> = OnceLock::new();
     static NO: OnceLock<SafeCursor> = OnceLock::new();
     static SIZEALL: OnceLock<SafeCursor> = OnceLock::new();
-    static PEN: OnceLock<SafeCursor> = OnceLock::new();
     let (lock, name) = match style {
         CursorStyle::IBeam | CursorStyle::IBeamCursorForVerticalLayout => (&IBEAM, IDC_IBEAM),
         CursorStyle::Crosshair => (&CROSS, IDC_CROSS),
@@ -118,7 +117,8 @@ pub(crate) fn load_cursor(style: CursorStyle) -> Option<HCURSOR> {
         CursorStyle::ResizeUpRightDownLeft => (&SIZENESW, IDC_SIZENESW),
         CursorStyle::OperationNotAllowed => (&NO, IDC_NO),
         CursorStyle::Move => (&SIZEALL, IDC_SIZEALL),
-        CursorStyle::Pen => (&PEN, IDC_PEN),
+        // Windows' pen (IDC_PEN) is not in the bindings: the cross, as a drawing tool's
+        CursorStyle::Pen => (&CROSS, IDC_CROSS),
         _ => (&ARROW, IDC_ARROW),
     };
     Some(
