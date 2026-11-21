@@ -1,7 +1,7 @@
 use crate::{
     ActiveTooltip, AnyView, App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId,
     HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, TextOverflow,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, px, SharedString, Size, TextOverflow,
     TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
     WrappedLineLayout, register_tooltip_mouse_handlers, set_tooltip_on_window,
 };
@@ -620,6 +620,53 @@ struct TextLayoutInner {
     wrap_width: Option<Pixels>,
     size: Option<Size<Pixels>>,
     bounds: Option<Bounds<Pixels>>,
+    /// The width the lines were cut or wrapped at (none: laid out at their own width), and whether a cut was made.
+    laid_at: Option<Pixels>,
+    truncated: bool,
+    /// Each width this frame's layout asked for, kept by the width it was laid at: taffy answers a later request
+    /// from its cache without measuring again, so the last measure is not always the size the text is given (a
+    /// truncating text measured at 0 in an intrinsic pass drew "…" in a box as wide as its words). `prepaint` draws
+    /// the one laid out for its bounds.
+    tried: SmallVec<[Laid; 2]>,
+}
+
+/// One layout of a measure, kept for `prepaint` to choose by its bounds.
+#[derive(Clone)]
+struct Laid {
+    len: usize,
+    lines: SmallVec<[WrappedLine; 1]>,
+    wrap_width: Option<Pixels>,
+    size: Size<Pixels>,
+    laid_at: Option<Pixels>,
+    truncated: bool,
+}
+
+/// At most this many layouts are kept a frame.
+const TRIED: usize = 8;
+
+/// Which kept layout a text drawn in `bounds` shows: the last one of its size, else of its width, else the one laid
+/// at the least width that is still at least the bounds' (a box stretched past its words), else none (the last
+/// measure stands). One layout alone is always the one.
+fn laid_for(tried: &[Laid], bounds: Size<Pixels>) -> Option<usize> {
+    if tried.len() < 2 {
+        return None;
+    }
+    let near = |a: Pixels, b: Pixels| (a - b).abs() < px(0.5);
+    tried
+        .iter()
+        .rposition(|t| near(t.size.width, bounds.width) && near(t.size.height, bounds.height))
+        .or_else(|| tried.iter().rposition(|t| near(t.size.width, bounds.width)))
+        .or_else(|| {
+            tried
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.laid_at.is_none_or(|w| w + px(0.5) >= bounds.width))
+                .min_by(|(_, a), (_, b)| {
+                    let w = |t: &Laid| t.laid_at.unwrap_or(Pixels::MAX);
+                    w(a).partial_cmp(&w(b)).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(i, _)| i)
+        })
 }
 
 impl TextLayout {
@@ -680,15 +727,18 @@ impl TextLayout {
                 // 2. wrap_width matches (or both are None)
                 // 3. truncate_width is None (if truncate_width is Some, we need to re-layout
                 //    because the previous layout may have been computed without truncation)
+                // (4. and the cached layout cut nothing: a cut line is no size of the whole text)
                 if let Some(text_layout) = element_state.0.borrow().as_ref()
                     && let Some(size) = text_layout.size
                     && (wrap_width.is_none() || wrap_width == text_layout.wrap_width)
                     && truncate_width.is_none()
+                    && !text_layout.truncated
                 {
                     return size;
                 }
 
                 let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
+                let whole = text.len();
                 let (text, runs) = if truncate_width.is_some() {
                     if let Some(max_lines) = text_style.line_clamp
                         && let Some(wrap_width) = wrap_width
@@ -745,6 +795,9 @@ impl TextLayout {
                         wrap_width,
                         size: Some(Size::default()),
                         bounds: None,
+                        laid_at: None,
+                        truncated: false,
+                        tried: SmallVec::new(),
                     });
                     return Size::default();
                 };
@@ -756,13 +809,35 @@ impl TextLayout {
                     size.width = size.width.max(line_size.width).ceil();
                 }
 
-                element_state.0.borrow_mut().replace(TextLayoutInner {
+                let laid_at = truncate_width.or(wrap_width);
+                let truncated = len != whole;
+                let mut state = element_state.0.borrow_mut();
+                let mut tried = state
+                    .as_mut()
+                    .map(|s| std::mem::take(&mut s.tried))
+                    .unwrap_or_default();
+                tried.retain(|t| t.laid_at != laid_at);
+                if tried.len() >= TRIED {
+                    tried.remove(0);
+                }
+                tried.push(Laid {
+                    len,
+                    lines: lines.clone(),
+                    wrap_width,
+                    size,
+                    laid_at,
+                    truncated,
+                });
+                state.replace(TextLayoutInner {
                     lines,
                     len,
                     line_height,
                     wrap_width,
                     size: Some(size),
                     bounds: None,
+                    laid_at,
+                    truncated,
+                    tried,
                 });
 
                 size
@@ -776,6 +851,15 @@ impl TextLayout {
             .as_mut()
             .with_context(|| format!("measurement has not been performed on {text}"))
             .unwrap();
+        if let Some(i) = laid_for(&element_state.tried, bounds.size) {
+            let l = element_state.tried[i].clone();
+            element_state.lines = l.lines;
+            element_state.len = l.len;
+            element_state.wrap_width = l.wrap_width;
+            element_state.size = Some(l.size);
+            element_state.laid_at = l.laid_at;
+            element_state.truncated = l.truncated;
+        }
         element_state.bounds = Some(bounds);
     }
 
