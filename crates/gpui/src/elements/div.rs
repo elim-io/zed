@@ -2884,6 +2884,21 @@ impl Interactivity {
                 });
             }
 
+            // while held, the lit look follows the pointer in and out of the element
+            if self.active_style.is_some() {
+                let active_state = active_state.clone();
+                let hitbox = hitbox.clone();
+                let inside = hitbox.is_hovered(window);
+                window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, _cx| {
+                    if phase == DispatchPhase::Bubble
+                        && active_state.borrow().element
+                        && hitbox.is_hovered(window) != inside
+                    {
+                        window.refresh();
+                    }
+                });
+            }
+
             {
                 let active_group_hitbox = self
                     .group_active_style
@@ -3149,8 +3164,11 @@ impl Interactivity {
                 style.refine(&group.style)
             }
 
+            // a press is lit only while the pointer is over the element that took it, as a Mac's button follows the
+            // pointer while held (it acts only on a release inside: `on_click`)
             if let Some(active_style) = self.active_style.as_ref()
                 && clicked_state.element
+                && hitbox.is_none_or(|hitbox| hitbox.is_hovered(window))
             {
                 style.refine(active_style)
             }
