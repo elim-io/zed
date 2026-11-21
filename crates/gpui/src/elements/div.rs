@@ -46,7 +46,9 @@ use std::{
 use super::ImageCacheProvider;
 
 const DRAG_THRESHOLD: f64 = 2.;
-const DEFAULT_TOOLTIP_SHOW_DELAY: Duration = Duration::from_millis(500);
+// a Mac shows a tooltip after the pointer has rested about 1.5 s (Finder's toolbar, measured on macOS 27: Ensemble
+// ADR-0161)
+const DEFAULT_TOOLTIP_SHOW_DELAY: Duration = Duration::from_millis(1500);
 const HOVERABLE_TOOLTIP_HIDE_DELAY: Duration = Duration::from_millis(500);
 
 /// The styling information for a given group.
