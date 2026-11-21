@@ -98,6 +98,73 @@ use std::sync::{
 /// The fixed AccessKit node ID used for the root of every window's a11y tree.
 pub(crate) const ROOT_NODE_ID: NodeId = NodeId(0);
 
+/// The root alone: a window's tree before its first frame was built.
+pub(crate) fn root_alone() -> TreeUpdate {
+    TreeUpdate {
+        nodes: vec![(ROOT_NODE_ID, accesskit::Node::new(accesskit::Role::Window))],
+        tree: Some(accesskit::Tree::new(ROOT_NODE_ID)),
+        tree_id: accesskit::TreeId::ROOT,
+        focus: ROOT_NODE_ID,
+    }
+}
+
+/// A window's accessibility state shared with its platform adapter's callbacks (which may run on another thread).
+///
+/// An adapter asks for a window's tree once, at a client's first read of it, and must answer at once. A window that
+/// builds no tree until then answers with its root alone and sends the tree a frame later, so a client that reads once
+/// (a script's `find`, System Events) sees an empty window. So once a client has read any window of the app (`seen`,
+/// one flag per `App`), every window opened later builds its tree from its first frame and holds it (`held`) until its
+/// adapter asks: the first read gets the window whole. A window opened before any client read still answers its root
+/// alone the first time; a later frame sends the tree, as before.
+#[derive(Clone)]
+pub(crate) struct Shared {
+    /// Whether a11y features have been requested for this window (by its adapter, or forced by a test).
+    pub(crate) active: Arc<AtomicBool>,
+    /// An AX client has read a window of this app.
+    seen: Arc<AtomicBool>,
+    first: Arc<parking_lot::Mutex<FirstAsk>>,
+}
+
+#[derive(Default)]
+struct FirstAsk {
+    /// The adapter asked for this window's tree.
+    asked: bool,
+    /// The last tree built before it asked.
+    held: Option<TreeUpdate>,
+}
+
+impl Shared {
+    /// A new window's: active from its first frame when a client has read another window of the app.
+    pub(crate) fn new(seen: Arc<AtomicBool>) -> Self {
+        Self {
+            active: Arc::new(AtomicBool::new(seen.load(Ordering::SeqCst))),
+            seen,
+            first: Arc::default(),
+        }
+    }
+
+    /// The adapter's first request (a client reads this window): the window builds its tree from now on, every window
+    /// the app opens later from its first frame, and the answer is the tree held, else the root alone.
+    pub(crate) fn activate(&self) -> TreeUpdate {
+        self.seen.store(true, Ordering::SeqCst);
+        self.active.store(true, Ordering::SeqCst);
+        let mut first = self.first.lock();
+        first.asked = true;
+        first.held.take().unwrap_or_else(root_alone)
+    }
+
+    /// The update to send to the adapter, or none while it has not asked (the tree is held for its first request; an
+    /// adapter that has not asked drops an update).
+    pub(crate) fn hold(&self, update: TreeUpdate) -> Option<TreeUpdate> {
+        let mut first = self.first.lock();
+        if first.asked {
+            return Some(update);
+        }
+        first.held = Some(update);
+        None
+    }
+}
+
 /// A listener for an accessibility action on a specific node.
 pub(crate) type A11yActionListener =
     Box<dyn FnMut(Option<&accesskit::ActionData>, &mut Window, &mut App) + 'static>;
@@ -111,14 +178,15 @@ pub(crate) struct A11y {
     ///
     /// [forcibly disabled]: crate::Application::new_inaccessible
     force_disabled: bool,
-    /// Whether a11y features have been requested by the system.
+    /// Whether a11y features have been requested by the system (`shared.active`), and the tree held for the adapter's
+    /// first request.
     ///
     /// Updated by AccessKit using callbacks provided to the adapter. Can change
     /// halfway through a frame.
-    active_flag: Arc<AtomicBool>,
+    pub(crate) shared: Shared,
     /// Whether a11y features are active for *this specific frame*.
     ///
-    /// At the start of each frame, we load [`Self::active_flag`] (using
+    /// At the start of each frame, we load [`Self::shared`] (using
     /// [`Self::sync_active_flag`]) and use this to determine whether we
     /// should construct a [`TreeUpdate`] for this frame. It's important that
     /// this value is stable within a frame, because the builder API exposed by
@@ -141,10 +209,10 @@ pub(crate) struct A11y {
 }
 
 impl A11y {
-    pub(crate) fn new(active_flag: Arc<AtomicBool>, force_disabled: bool) -> Self {
+    pub(crate) fn new(shared: Shared, force_disabled: bool) -> Self {
         Self {
             force_disabled,
-            active_flag,
+            shared,
             active_this_frame: false,
             nodes: A11yNodeBuilder::new(),
             focus_ids: FxHashMap::default(),
@@ -159,10 +227,10 @@ impl A11y {
 
     /// Ensures that [`Self::is_active`] returns up to date information.
     ///
-    /// See the docs for [`Self::active_flag`] and [`Self::active_this_frame`]
+    /// See the docs for [`Self::shared`] and [`Self::active_this_frame`]
     /// for more commentary.
     pub(crate) fn sync_active_flag(&mut self) {
-        self.active_this_frame = !self.force_disabled && self.active_flag.load(Ordering::SeqCst);
+        self.active_this_frame = !self.force_disabled && self.shared.active.load(Ordering::SeqCst);
     }
 
     pub(crate) fn is_active(&self) -> bool {
@@ -184,10 +252,10 @@ impl A11y {
         self.nodes.finalize()
     }
 
-    /// Sets the active flag with no adapter, as an AX client's first query does.
+    /// Sets the active flag with no adapter request (no tree is held for one).
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn force_active(&mut self) {
-        self.active_flag.store(true, Ordering::SeqCst);
+        self.shared.active.store(true, Ordering::SeqCst);
     }
 }
 

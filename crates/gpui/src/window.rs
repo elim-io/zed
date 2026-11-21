@@ -53,7 +53,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc, Weak,
-        atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst},
+        atomic::{AtomicUsize, Ordering::SeqCst},
     },
     time::Duration,
 };
@@ -64,7 +64,6 @@ mod prompts;
 
 use self::a11y::A11y;
 #[cfg(not(target_family = "wasm"))]
-use self::a11y::ROOT_NODE_ID;
 use crate::util::{
     atomic_incr_if_not_zero, ceil_to_device_pixel, floor_to_device_pixel, round_half_toward_zero,
     round_half_toward_zero_f64, round_stroke_to_device_pixel, round_to_device_pixel,
@@ -1379,16 +1378,10 @@ impl Window {
         }
 
         let accessibility_force_disabled = cx.accessibility_force_disabled;
-        let a11y_active_flag = Arc::new(AtomicBool::new(false));
+        let a11y_shared = a11y::Shared::new(cx.a11y_client_seen.clone());
 
         #[cfg(not(target_family = "wasm"))]
         if !accessibility_force_disabled {
-            let initial_tree = accesskit::TreeUpdate {
-                nodes: vec![(ROOT_NODE_ID, accesskit::Node::new(accesskit::Role::Window))],
-                tree: Some(accesskit::Tree::new(ROOT_NODE_ID)),
-                tree_id: accesskit::TreeId::ROOT,
-                focus: ROOT_NODE_ID,
-            };
             let (activation_sender, activation_receiver) = async_channel::unbounded::<()>();
             let (deactivation_sender, deactivation_receiver) = async_channel::unbounded::<()>();
             let (action_sender, action_receiver) =
@@ -1396,19 +1389,19 @@ impl Window {
 
             platform_window.a11y_init(crate::A11yCallbacks {
                 activation: {
-                    let active_flag = a11y_active_flag.clone();
+                    let shared = a11y_shared.clone();
                     Box::new(move || {
                         log::info!("Accessibility activated");
-                        active_flag.store(true, SeqCst);
+                        let tree = shared.activate();
                         activation_sender.send_blocking(()).log_err();
-                        Some(initial_tree.clone())
+                        Some(tree)
                     })
                 },
                 action: Box::new(move |request| {
                     action_sender.send_blocking(request).log_err();
                 }),
                 deactivation: {
-                    let active_flag = a11y_active_flag.clone();
+                    let active_flag = a11y_shared.active.clone();
                     Box::new(move || {
                         log::info!("Accessibility deactivated");
                         active_flag.store(false, SeqCst);
@@ -1418,8 +1411,8 @@ impl Window {
             });
 
             // A11y can be activated at any time, and so we cannot compute a
-            // correct `TreeUpdate` on-demand. When this happens, we return a
-            // default empty `TreeUpdate`.
+            // correct `TreeUpdate` on-demand. When this happens, we return the
+            // tree held from the last frame, else the root alone (`a11y::Shared`).
             //
             // So we force a new frame, which will then send a correct `TreeUpdate`.
             let mut async_cx = cx.to_async();
@@ -1781,7 +1774,7 @@ impl Window {
             captured_hitbox: None,
             #[cfg(any(feature = "inspector", debug_assertions))]
             inspector: None,
-            a11y: A11y::new(a11y_active_flag, accessibility_force_disabled),
+            a11y: A11y::new(a11y_shared, accessibility_force_disabled),
         })
     }
 
@@ -1925,17 +1918,14 @@ impl Window {
         // close takes away, and aborts the app. The root alone, sent before, leaves no node to ask.
         #[cfg(not(target_family = "wasm"))]
         if !self.removed && self.a11y.is_active() {
-            let root = accesskit::TreeUpdate {
-                nodes: vec![(ROOT_NODE_ID, accesskit::Node::new(accesskit::Role::Window))],
-                tree: Some(accesskit::Tree::new(ROOT_NODE_ID)),
-                tree_id: accesskit::TreeId::ROOT,
-                focus: ROOT_NODE_ID,
-            };
+            let root = a11y::root_alone();
             #[cfg(any(test, feature = "test-support"))]
             {
                 self.a11y.last_tree = Some(root.clone());
             }
-            self.platform_window.a11y_tree_update(root);
+            if let Some(root) = self.a11y.shared.hold(root) {
+                self.platform_window.a11y_tree_update(root);
+            }
         }
         self.removed = true;
     }
@@ -2923,7 +2913,8 @@ impl Window {
                 self.a11y.last_tree = Some(tree_update.clone());
             }
 
-            if should_send_a11y_update {
+            if should_send_a11y_update && let Some(tree_update) = self.a11y.shared.hold(tree_update)
+            {
                 log::debug!(
                     "Sending a11y tree update: {} nodes",
                     tree_update.nodes.len()
@@ -5579,12 +5570,20 @@ impl Window {
             .push((action, Box::new(listener)));
     }
 
-    /// Turns accessibility on for this window as an AX client's first query
-    /// would, with no adapter, and redraws: every later frame builds the tree.
+    /// Turns accessibility on for this window with no adapter request, and
+    /// redraws: every later frame builds the tree.
     #[cfg(any(test, feature = "test-support"))]
     pub fn a11y_force_active(&mut self) {
         self.a11y.force_active();
         self.refresh();
+    }
+
+    /// An AX client's first read of this window, as its adapter asks: the tree it is answered with. Every frame after
+    /// it builds the tree, and so does every window the app opens later, from its first frame.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn a11y_first_read(&mut self) -> accesskit::TreeUpdate {
+        self.refresh();
+        self.a11y.shared.activate()
     }
 
     /// The last frame's whole accessibility tree, `None` before a frame was

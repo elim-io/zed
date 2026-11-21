@@ -688,6 +688,9 @@ pub struct App {
     /// Whether the app was created by [`Application::new_inaccessible`]. No
     /// accesskit APIs will be called when this flag is set.
     pub(crate) accessibility_force_disabled: bool,
+    /// An AX client has read a window of this app: a window opened later builds its tree from its first frame
+    /// (`window::a11y::Shared`).
+    pub(crate) a11y_client_seen: Arc<std::sync::atomic::AtomicBool>,
     flushing_effects: bool,
     pending_updates: usize,
     quit_mode: QuitMode,
@@ -778,6 +781,7 @@ impl App {
                 quitting: false,
                 cursor_hide_mode: CursorHideMode::default(),
                 accessibility_force_disabled: false,
+                a11y_client_seen: Arc::default(),
 
                 #[cfg(any(test, feature = "test-support", debug_assertions))]
                 name: None,

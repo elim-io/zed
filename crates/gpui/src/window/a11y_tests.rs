@@ -182,6 +182,46 @@ fn a_removed_window_leaves_the_root_alone(cx: &mut TestAppContext) {
     });
 }
 
+#[gpui::test]
+fn a_window_opened_after_a_client_read_answers_its_first_read_whole(cx: &mut TestAppContext) {
+    let controls = |_: &mut Window, _: &mut Context<Controls>| Controls {
+        pressed: Rc::default(),
+    };
+    let has_save = |tree: &accesskit::TreeUpdate| {
+        tree.nodes
+            .iter()
+            .any(|(_, node)| node.author_id() == Some("save"))
+    };
+
+    // The app's first read: no window built a tree, so the root alone; the next frame builds it.
+    let first = cx.add_window(controls);
+    cx.run_until_parked();
+    let tree = first
+        .update(cx, |_, window, _| window.a11y_first_read())
+        .expect("the first window");
+    assert_eq!(
+        tree.nodes.len(),
+        1,
+        "nothing was built before a client asked"
+    );
+    cx.run_until_parked();
+    first
+        .update(cx, |_, window, _| assert!(node(window, "save").is_some()))
+        .expect("the first window");
+
+    // A window opened after it (a recording bar opened while a script reads the app): its first frame builds the
+    // tree, and its first read is answered with it, not with the root alone.
+    let second = cx.add_window(controls);
+    cx.run_until_parked();
+    let tree = second
+        .update(cx, |_, window, _| window.a11y_first_read())
+        .expect("the second window");
+    assert!(
+        has_save(&tree),
+        "the first read of a later window holds its nodes"
+    );
+}
+
 struct Cached {
     renders: usize,
     child: Entity<CachedChild>,
