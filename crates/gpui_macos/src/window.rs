@@ -695,6 +695,15 @@ impl MacWindowState {
         }
     }
 
+    /// The link comes up for a key, before its echo.
+    fn key_pressed(&mut self) {
+        if let Some(display_link) = self.display_link.as_ref()
+            && self.frame_pace.key(self.frames_epoch.elapsed())
+        {
+            display_link.start_detached();
+        }
+    }
+
     /// The waker's answer to new work. A link that is not stopped but gives no frames is not started again: that did
     /// not bring its frames back (one frame per waker call, from the request below); a new link, as an occlusion
     /// change makes, does.
@@ -2329,6 +2338,7 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
                 return NO;
             }
 
+            lock.key_pressed();
             drop(lock);
 
             let is_composing =

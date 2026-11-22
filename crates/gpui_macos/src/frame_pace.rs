@@ -1,7 +1,8 @@
 //! When a window's display link runs (Ensemble ADR-0173). The link wakes the main thread every vsync, 120 times a second
 //! on a ProMotion display, even with nothing to draw, so it runs only for frames that come close together (typing, a
-//! scroll, an animation) and [`IDLE_PAUSE`] after them. A lone frame (a caret's blink, a clock's second) is drawn at
-//! once by one frame request and starts no link. No platform call is made here: [`FramePace`] only decides, and every
+//! scroll, an animation) and [`IDLE_PAUSE`] after them, and as long after a key: a display whose link rests shows a
+//! frame up to half a refresh later, and a key's echo often comes from another process. A lone frame (a caret's
+//! blink, a clock's second) is drawn at once by one frame request and starts no link. No platform call is made here: [`FramePace`] only decides, and every
 //! `now` is a time since the window opened.
 //!
 //! Its tests need no macOS: `rustc --test --edition 2024 crates/gpui_macos/src/frame_pace.rs`.
@@ -29,7 +30,7 @@ const STALL: Duration = Duration::from_millis(100);
 pub(crate) enum Wake {
     /// A frame is on its way.
     Nothing,
-    /// Request one frame; the link stays stopped.
+    /// Request one frame; the link stays as it is.
     Draw,
     /// Request one frame and start the link.
     Run,
@@ -43,6 +44,8 @@ pub(crate) struct FramePace {
     paused: AtomicBool,
     /// When a lone frame was requested; 0 once it came.
     lone: AtomicU64,
+    /// The link was started for a key and gave no frame yet: the key's own work need not wait for its first.
+    starting: AtomicBool,
     /// When the window last gave a frame, drawn or not.
     seen: AtomicU64,
     /// When it last drew.
@@ -60,6 +63,7 @@ impl FramePace {
         Self {
             paused: AtomicBool::new(false),
             lone: AtomicU64::new(0),
+            starting: AtomicBool::new(false),
             seen: AtomicU64::new(0),
             drawn: AtomicU64::new(0),
             until: AtomicU64::new(0),
@@ -73,6 +77,8 @@ impl FramePace {
         if !self.paused.load(Relaxed) {
             if now > self.seen.load(Relaxed) + ms(STALL) {
                 Wake::Replace
+            } else if self.starting.swap(false, Relaxed) {
+                Wake::Draw
             } else {
                 Wake::Nothing
             }
@@ -95,19 +101,33 @@ impl FramePace {
         let now = ms(now);
         self.paused.store(false, Relaxed);
         self.lone.store(0, Relaxed);
+        self.starting.store(false, Relaxed);
         self.seen.store(now, Relaxed);
         self.drawn.store(now, Relaxed);
         self.until.store(now + ms(IDLE_PAUSE), Relaxed);
     }
 
+    /// A key was pressed. True: start the link.
+    pub(crate) fn key(&self, now: Duration) -> bool {
+        if self.paused.load(Relaxed) {
+            self.run(now);
+            self.starting.store(true, Relaxed);
+            return true;
+        }
+        self.until.fetch_max(ms(now) + ms(IDLE_PAUSE), Relaxed);
+        false
+    }
+
     /// The link is dropped: nothing is paused.
     pub(crate) fn dropped(&self) {
         self.paused.store(false, Relaxed);
+        self.starting.store(false, Relaxed);
         self.lone.store(0, Relaxed);
     }
 
     /// A frame starts. Work that comes while a lone one is made (an animation's next frame) is no longer lone.
     pub(crate) fn begin(&self, now: Duration) {
+        self.starting.store(false, Relaxed);
         if self.lone.swap(0, Relaxed) != 0 {
             self.drawn.store(ms(now), Relaxed);
         }
@@ -150,6 +170,8 @@ mod tests {
         steps: u32,
         frames: Vec<u64>,
         starts: u32,
+        /// When a link started for a key comes up; 0 for none.
+        up: u64,
         now: u64,
     }
 
@@ -164,6 +186,7 @@ mod tests {
                 steps: 0,
                 frames: Vec::new(),
                 starts: 0,
+                up: 0,
                 now: 0,
             };
             w.pace.run(Duration::ZERO);
@@ -190,6 +213,14 @@ mod tests {
         fn notify(&mut self) {
             self.dirty = true;
             self.wake();
+        }
+
+        /// A key: the link comes up (5 ms here, on a thread of its own), its work 1 ms later.
+        fn key(&mut self) {
+            if self.pace.key(self.at()) {
+                self.starts += 1;
+                self.up = self.now + 5;
+            }
         }
 
         fn animate(&mut self, frames: u32) {
@@ -220,6 +251,10 @@ mod tests {
         fn run(&mut self, ms: u64) {
             for _ in 0..ms {
                 self.now += 1;
+                if self.up != 0 && self.now >= self.up {
+                    self.up = 0;
+                    self.running = true;
+                }
                 if self.requested || (self.running && self.now % 8 == 0) {
                     self.step();
                 }
@@ -265,6 +300,45 @@ mod tests {
         assert!(!w.running);
         // the pause after the burst, then a step a blink
         assert!(w.steps < 5 * 12 + 63 + 13 + 10, "{}", w.steps);
+    }
+
+    #[test]
+    fn a_key_starts_the_link_and_its_frame_comes_at_once() {
+        let mut w = Window::new();
+        w.rest();
+        let t = w.now;
+        w.key();
+        w.notify();
+        w.run(2);
+        assert_eq!((w.frames.clone(), w.starts), (vec![t + 1], 1));
+        // an echo a little later comes at the link's next vsync, and the link runs through a pause in typing
+        w.run(8);
+        w.notify();
+        w.run(9);
+        assert_eq!(w.frames.len(), 2);
+        w.run(400);
+        assert!(w.running);
+        w.key();
+        w.run(450);
+        assert!(w.running, "a key renews the pause");
+        w.run(100);
+        assert!(!w.running);
+        assert_eq!(w.starts, 1);
+    }
+
+    #[test]
+    fn a_blink_after_a_key_costs_its_own_frames() {
+        let mut w = Window::new();
+        w.rest();
+        w.key();
+        w.notify();
+        w.run(515);
+        w.steps = 0;
+        for _ in 0..10 {
+            w.notify();
+            w.run(500);
+        }
+        assert!(w.steps <= 11, "{}", w.steps);
     }
 
     #[test]
