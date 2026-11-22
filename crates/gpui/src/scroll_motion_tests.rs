@@ -312,3 +312,47 @@ fn a_wheel_on_an_area_that_fits_moves_nothing() {
     offer(&mut r, &[c]);
     assert_eq!(r.take(1, ScrollPhase::None, point(px(0.), px(100.))), None);
 }
+
+#[test]
+fn momentum_at_an_edge_bounces_once_and_the_rest_is_dropped() {
+    let mut r = ScrollRouter::default();
+    let t0 = Instant::now();
+    let max = point(px(0.), px(300.));
+    let sz = size(px(300.), px(400.));
+    // near the end, a flick's momentum at 20 points a frame (1200 points a second at 60 Hz)
+    let mut o = point(px(0.), px(-260.));
+    let mut t = t0;
+    let mut most = Pixels::ZERO;
+    for (i, phase) in [ScrollPhase::MomentumBegan]
+        .into_iter()
+        .chain(std::iter::repeat_n(ScrollPhase::Momentum, 40))
+        .chain([ScrollPhase::MomentumEnded])
+        .enumerate()
+    {
+        t = t0 + Duration::from_micros(16_667 * i as u64);
+        r.apply(5, &mut o, max, sz, point(px(0.), px(-20.)), false, phase, t);
+        let (s, _) = r.step(5, &mut o, max, t + Duration::from_millis(4));
+        if i >= 2 {
+            assert_eq!(o.y, px(-300.), "the offset stays at the end once there");
+        }
+        most = most.min(s.y);
+        assert!(s.y <= Pixels::ZERO, "the bounce goes past the end only");
+    }
+    // one bounce, about v / (OMEGA * e) = 1200 / 54 points, and back at rest well before the momentum ended
+    assert!(most < px(-10.) && most > px(-40.), "{most:?}");
+    let (s, moving) = r.step(5, &mut o, max, t + Duration::from_millis(10));
+    assert_eq!(s, Point::default());
+    assert!(!moving);
+    // the next gesture moves the content again
+    r.apply(
+        5,
+        &mut o,
+        max,
+        sz,
+        point(px(0.), px(50.)),
+        false,
+        ScrollPhase::Began,
+        t + Duration::from_millis(100),
+    );
+    assert_eq!(o.y, px(-250.));
+}

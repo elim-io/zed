@@ -4,8 +4,10 @@
 //!   gesture's first moving event (the innermost under the pointer that can move on the gesture's main axis), whatever
 //!   comes under the pointer later; a wheel's notch goes to the innermost area that can move its way.
 //! - A wheel glides: a line delta moves a target and the offset eases to it; the next notch moves the target.
-//! - Elastic edges: a gesture or its momentum past an edge stretches the content (paint only: the offset stays inside
-//!   the content), and it springs back once the fingers lift.
+//! - Elastic edges: a gesture past an edge stretches the content (paint only: the offset stays inside the content),
+//!   and it springs back once the fingers lift. Momentum that reaches an edge is spent on one bounce at its speed
+//!   there, and the rest of it is dropped (as AppKit's scroll views do): fed into the band, the system's tail of
+//!   momentum events kept pushing against the spring, and a fast flick shook at the edge.
 //! - A programme's own move (an offset set by anyone else) cancels a glide or a spring.
 //!
 //! The router lives on the window; a scroll area (a `div` with overflow scroll, `uniform_list`, `list`) offers itself
@@ -27,6 +29,9 @@ pub(crate) const GLIDE: Duration = Duration::from_millis(150);
 const RUBBER: f32 = 0.55;
 /// The spring back's angular frequency (critically damped): a 100 px stretch is under half a point in 350 ms.
 const OMEGA: f32 = 20.;
+/// The fastest bounce, in points a second: a critically damped spring from rest at `v` peaks at `v / (OMEGA * e)`,
+/// so the bounce is never drawn past about 55 points.
+const BOUNCE_MAX: f32 = 3000.;
 
 /// The axis a gesture moves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -218,6 +223,43 @@ impl ScrollRouter {
         }
         let m = self.motions.entry(key).or_default();
         m.glide = None;
+        if matches!(phase, ScrollPhase::MayBegin | ScrollPhase::Began) {
+            m.bounced = false;
+        }
+        let since = m
+            .event_at
+            .map_or(1. / 60., |t| now.saturating_duration_since(t).as_secs_f32());
+        m.event_at = Some(now);
+        if phase.is_momentum() {
+            // Momentum after the fingers left the band, or after its bounce: dropped.
+            if m.bounced || m.stretch != Point::default() {
+                m.bounced = true;
+                return false;
+            }
+            let dt = since.clamp(1. / 240., 1. / 30.);
+            let mut hit = false;
+            for (o, v, d, max) in [
+                (&mut offset.x, &mut m.velocity.x, delta.x, max.x),
+                (&mut offset.y, &mut m.velocity.y, delta.y, max.y),
+            ] {
+                if max <= Pixels::ZERO {
+                    continue;
+                }
+                let n = *o + d;
+                if n > Pixels::ZERO || n < -max {
+                    *o = n.clamp(-max, Pixels::ZERO);
+                    *v = px((f32::from(d) / dt).clamp(-BOUNCE_MAX, BOUNCE_MAX));
+                    hit = true;
+                } else {
+                    *o = n;
+                }
+            }
+            m.bounced = hit;
+            m.held = false;
+            m.written = Some(*offset);
+            m.tick = now;
+            return *offset != before || hit;
+        }
         let was = m.stretch;
         for (o, s, d, max, len) in [
             (&mut offset.x, &mut m.stretch.x, delta.x, max.x, size.width),
@@ -285,8 +327,10 @@ impl ScrollRouter {
         m.tick = now;
         m.written = Some(*offset);
         let stretch = m.stretch;
-        let moving = m.glide.is_some() || (!m.held && stretch != Point::default());
-        if !moving && !m.held && stretch == Point::default() {
+        let springing = stretch != Point::default() || m.velocity != Point::default();
+        let moving = m.glide.is_some() || (!m.held && springing);
+        // a bounce's motion stays until the next gesture: it remembers that the momentum is spent
+        if !moving && !m.held && !m.bounced {
             self.motions.remove(&key);
         }
         (stretch, moving)
@@ -370,6 +414,10 @@ struct Motion {
     velocity: Point<Pixels>,
     /// Fingers on the trackpad: no spring yet.
     held: bool,
+    /// The gesture's momentum reached an edge and bounced: the rest of it is dropped.
+    bounced: bool,
+    /// When the last phased event came (a momentum's speed at the edge).
+    event_at: Option<Instant>,
     /// The offset this motion last wrote; anything else is a programme's move.
     written: Option<Point<Pixels>>,
     tick: Instant,
@@ -382,6 +430,8 @@ impl Default for Motion {
             stretch: Point::default(),
             velocity: Point::default(),
             held: false,
+            bounced: false,
+            event_at: None,
             written: None,
             tick: Instant::now(),
         }
