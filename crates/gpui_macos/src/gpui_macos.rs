@@ -8,6 +8,7 @@ mod dispatcher;
 mod display;
 mod display_link;
 mod events;
+mod frame_pace;
 mod keyboard;
 mod pasteboard;
 
