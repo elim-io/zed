@@ -133,11 +133,6 @@ unsafe fn build_classes() {
     unsafe {
         WINDOW_CLASS = build_window_class("GPUIWindow", class!(NSWindow));
         PANEL_CLASS = build_window_class("GPUIPanel", class!(NSPanel));
-        // AppKit asks the key window, not its first responder, for the focused element, and answered the window
-        // itself while a field held the keyboard: hand the question to the content view, whose AccessKit adapter
-        // answers with the tree's focused node (nothing while the focus is the window's root)
-        accesskit_macos::add_focus_forwarder_to_window_class("GPUIWindow");
-        accesskit_macos::add_focus_forwarder_to_window_class("GPUIPanel");
         VIEW_CLASS = {
             let mut decl = ClassDecl::new("GPUIView", class!(NSView)).unwrap();
             decl.add_ivar::<*mut c_void>(WINDOW_STATE_IVAR);
@@ -376,6 +371,10 @@ unsafe fn build_window_class(name: &'static str, superclass: &Class) -> *const C
         let mut decl = ClassDecl::new(name, superclass).unwrap();
         decl.add_ivar::<*mut c_void>(WINDOW_STATE_IVAR);
         decl.add_method(sel!(dealloc), dealloc_window as extern "C" fn(&Object, Sel));
+        decl.add_method(
+            sel!(accessibilityFocusedUIElement),
+            accessibility_focused_ui_element as extern "C" fn(&Object, Sel) -> id,
+        );
 
         decl.add_method(
             sel!(canBecomeMainWindow),
@@ -541,6 +540,9 @@ struct MacWindowState {
     activated_least_once: bool,
     closed: Arc<AtomicBool>,
     accesskit_adapter: Option<accesskit_macos::SubclassingAdapter>,
+    /// The adapter gave a client the tree (its initial tree was asked): from then on the window's focused element is
+    /// the tree's focused node.
+    a11y_active: Arc<AtomicBool>,
     // The parent window if this window is a sheet (Dialog kind)
     sheet_parent: Option<id>,
 }
@@ -976,6 +978,7 @@ impl MacWindow {
                 activated_least_once: false,
                 closed: Arc::new(AtomicBool::new(false)),
                 accesskit_adapter: None,
+                a11y_active: Arc::new(AtomicBool::new(false)),
                 sheet_parent: None,
             })));
 
@@ -1944,6 +1947,7 @@ impl PlatformWindow for MacWindow {
 
         let activation_handler = A11yActivationHandler {
             callback: callbacks.activation,
+            active: lock.a11y_active.clone(),
         };
         let action_handler = A11yActionHandler(callbacks.action);
 
@@ -1986,11 +1990,16 @@ impl PlatformWindow for MacWindow {
 
 struct A11yActivationHandler {
     callback: Box<dyn Fn() -> Option<accesskit::TreeUpdate> + Send + 'static>,
+    active: Arc<AtomicBool>,
 }
 
 impl accesskit::ActivationHandler for A11yActivationHandler {
     fn request_initial_tree(&mut self) -> Option<accesskit::TreeUpdate> {
-        (self.callback)()
+        let tree = (self.callback)();
+        if tree.is_some() {
+            self.active.store(true, Ordering::Release);
+        }
+        tree
     }
 }
 
@@ -2042,6 +2051,35 @@ unsafe fn is_gpui_window(window: id) -> bool {
     unsafe {
         msg_send![window, isKindOfClass: WINDOW_CLASS]
             || msg_send![window, isKindOfClass: PANEL_CLASS]
+    }
+}
+
+/// The window's focused element. AppKit asks the key window, not its first responder, and answered the window itself
+/// while a field held the keyboard. Once a client has the window's tree, the content view answers (AccessKit's adapter:
+/// the tree's focused node); before that, and while the tree's focus is the window's root, the window answers as
+/// AppKit does, so a focus question alone never builds the tree.
+extern "C" fn accessibility_focused_ui_element(this: &Object, _: Sel) -> id {
+    unsafe {
+        let raw: *mut c_void = *this.get_ivar(WINDOW_STATE_IVAR);
+        let active = !raw.is_null()
+            && get_window_state(this)
+                .try_lock()
+                .is_some_and(|state| state.a11y_active.load(Ordering::Acquire));
+        if active {
+            let view: id = msg_send![this, contentView];
+            if !view.is_null() {
+                let focused: id = msg_send![view, accessibilityFocusedUIElement];
+                if !focused.is_null() {
+                    return focused;
+                }
+            }
+        }
+        let panel: BOOL = msg_send![this, isKindOfClass: PANEL_CLASS];
+        if panel == YES {
+            msg_send![super(this, class!(NSPanel)), accessibilityFocusedUIElement]
+        } else {
+            msg_send![super(this, class!(NSWindow)), accessibilityFocusedUIElement]
+        }
     }
 }
 
