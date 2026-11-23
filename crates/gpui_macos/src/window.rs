@@ -133,6 +133,11 @@ unsafe fn build_classes() {
     unsafe {
         WINDOW_CLASS = build_window_class("GPUIWindow", class!(NSWindow));
         PANEL_CLASS = build_window_class("GPUIPanel", class!(NSPanel));
+        // AppKit asks the key window, not its first responder, for the focused element, and answered the window
+        // itself while a field held the keyboard: hand the question to the content view, whose AccessKit adapter
+        // answers with the tree's focused node (nothing while the focus is the window's root)
+        accesskit_macos::add_focus_forwarder_to_window_class("GPUIWindow");
+        accesskit_macos::add_focus_forwarder_to_window_class("GPUIPanel");
         VIEW_CLASS = {
             let mut decl = ClassDecl::new("GPUIView", class!(NSView)).unwrap();
             decl.add_ivar::<*mut c_void>(WINDOW_STATE_IVAR);
