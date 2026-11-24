@@ -63,6 +63,7 @@ pub(crate) mod a11y;
 mod prompts;
 
 use self::a11y::A11y;
+pub use self::a11y::A11yTextRow;
 #[cfg(not(target_family = "wasm"))]
 use crate::util::{
     atomic_incr_if_not_zero, ceil_to_device_pixel, floor_to_device_pixel, round_half_toward_zero,
@@ -5568,6 +5569,24 @@ impl Window {
             .entry(node_id)
             .or_default()
             .push((action, Box::new(listener)));
+    }
+
+    /// Whether this frame builds the accessibility tree (a client reads the window): an element that publishes more
+    /// than its node ([`Window::a11y_text`]) computes it only then.
+    pub fn a11y_active(&self) -> bool {
+        self.a11y.is_active()
+    }
+
+    /// Publishes `rows` as the text runs of the accessibility node being built (the nearest element around the caller
+    /// that has a role: a field, a label, a document) and `selection` (anchor and head, byte offsets of the whole
+    /// text) as its text selection, so a client reads the selection, a range's words and its bounds
+    /// (`AXSelectedTextRange`, `AXSelectedText`, `AXStringForRange`, `AXBoundsForRange` on macOS). Called during
+    /// prepaint; nothing while no client reads the window, under the root, or on a password's node.
+    pub fn a11y_text(&mut self, rows: &[A11yTextRow], selection: Option<(usize, usize)>) {
+        if self.a11y.is_active() {
+            let scale = self.scale_factor();
+            self.a11y.nodes.text(rows, selection, scale);
+        }
     }
 
     /// Turns accessibility on for this window with no adapter request, and

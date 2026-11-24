@@ -318,3 +318,76 @@ fn a_duplicate_id_is_reported_not_panicked_on(cx: &mut TestAppContext) {
         assert_eq!(label(window, "twin").as_deref(), Some("First"));
     });
 }
+
+/// A field whose drawn text publishes two rows ("ab" and its line break, then "cd") and a row of 300 characters.
+struct Words;
+
+impl Render for Words {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().id("field").role(Role::MultilineTextInput).size_full().child(
+            crate::canvas(
+                |bounds, window, _| {
+                    let row = |start: usize, text: String, y: f32| {
+                        let n = text.chars().count();
+                        crate::A11yTextRow {
+                            start,
+                            lengths: text.chars().map(|c| c.len_utf8() as u8).collect(),
+                            text,
+                            positions: (0..n).map(|i| i as f32 * 10.).collect(),
+                            widths: vec![10.; n],
+                            word_starts: vec![0],
+                            bounds: Bounds::new(
+                                point(bounds.origin.x + px(4.), bounds.origin.y + px(y)),
+                                size(px(100.), px(20.)),
+                            ),
+                        }
+                    };
+                    let long = "x".repeat(300);
+                    window.a11y_text(
+                        &[
+                            row(0, "ab\n".into(), 0.),
+                            row(3, "cd\n".into(), 20.),
+                            row(6, long, 40.),
+                        ],
+                        Some((1, 4)),
+                    );
+                },
+                |_, _, _, _| {},
+            )
+            .size_full(),
+        )
+    }
+}
+
+#[gpui::test]
+fn a_fields_rows_are_text_runs_with_its_selection(cx: &mut TestAppContext) {
+    let (_, cx) = cx.add_window_view(|_, _| Words);
+    cx.update(|window, _| window.a11y_force_active());
+    cx.run_until_parked();
+    cx.update(|window, _| {
+        let tree = window.a11y_tree().expect("the tree");
+        let (_, field) = node(window, "field").expect("the field");
+        let runs: Vec<&Node> = field
+            .children()
+            .iter()
+            .map(|id| &tree.nodes.iter().find(|(n, _)| n == id).expect("a run").1)
+            .collect();
+        assert_eq!(runs.len(), 4, "two rows, and 300 characters in two runs");
+        assert!(runs.iter().all(|r| r.role() == Role::TextRun));
+        assert_eq!(runs[0].value(), Some("ab\n"));
+        assert_eq!(runs[0].character_lengths(), &[1, 1, 1]);
+        assert_eq!(runs[0].character_positions(), Some(&[0., 20., 40.][..]), "device pixels");
+        let b = runs[0].bounds().expect("bounds");
+        assert_eq!((b.x0, b.y0, b.x1, b.y1), (8., 0., 68., 40.));
+        assert_eq!(runs[2].character_lengths().len(), 255);
+        assert_eq!(runs[3].character_lengths().len(), 45);
+        assert_eq!(runs[2].next_on_line(), Some(field.children()[3]));
+        assert_eq!(runs[3].previous_on_line(), Some(field.children()[2]));
+        assert_eq!(runs[3].character_positions().map(|p| p[0]), Some(0.));
+        let sel = field.text_selection().expect("the selection");
+        assert_eq!(sel.anchor.node, field.children()[0]);
+        assert_eq!(sel.anchor.character_index, 1);
+        assert_eq!(sel.focus.node, field.children()[1]);
+        assert_eq!(sel.focus.character_index, 1);
+    });
+}

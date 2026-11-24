@@ -87,7 +87,7 @@
 //! [`Drawable::prepaint`]: crate::Drawable::prepaint
 
 use crate::{App, Bounds, FocusId, Pixels, Window};
-use accesskit::{Action, NodeId, TreeUpdate};
+use accesskit::{Action, NodeId, Role, TextPosition, TextSelection, TreeUpdate};
 use collections::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use std::sync::{
@@ -163,6 +163,48 @@ impl Shared {
         first.held = Some(update);
         None
     }
+}
+
+/// One shown row of a text a reader can select in, for [`Window::a11y_text`]: published as AccessKit text runs (a row
+/// of more than 255 characters as several, linked on its line).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct A11yTextRow {
+    /// The byte offset of the row's first character in the whole text.
+    pub start: usize,
+    /// The row's words. The last row of a line that a line break ends carries it ("\n", one character).
+    pub text: String,
+    /// Each character's (a grapheme cluster's) length in bytes; their sum is `text`'s length.
+    pub lengths: Vec<u8>,
+    /// Each character's left edge from the row's left and its advance, in window pixels; empty where the row was not
+    /// laid out (a reader then gets no bounds for it).
+    pub positions: Vec<f32>,
+    /// Each character's advance, as `positions`.
+    pub widths: Vec<f32>,
+    /// The character index of each word's start, ascending.
+    pub word_starts: Vec<usize>,
+    /// The row's box in the window.
+    pub bounds: Bounds<Pixels>,
+}
+
+/// The most characters one AccessKit text run holds (its word starts are `u8` indices).
+const RUN_MAX: usize = 255;
+
+/// The node id of the `index`th text run under `parent`: stable from frame to frame, apart from every element's.
+fn run_id(parent: NodeId, index: usize) -> NodeId {
+    NodeId((parent.0 ^ 0x7e57_0000_0000_0000).wrapping_add((index as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15)))
+}
+
+/// Where `off` (a byte offset of the whole text) falls among `rows`: the row and the character index in it. At a soft
+/// wrap the offset is the next row's start; at a line's end it is its line break; past the end, the last row's end.
+fn row_position(rows: &[A11yTextRow], off: usize) -> Option<(usize, usize)> {
+    let r = rows.partition_point(|row| row.start <= off).checked_sub(1).unwrap_or(0);
+    let row = rows.get(r)?;
+    let (mut at, mut i) = (row.start, 0);
+    while i < row.lengths.len() && at + usize::from(row.lengths[i]) <= off {
+        at += usize::from(row.lengths[i]);
+        i += 1;
+    }
+    Some((r, i))
 }
 
 /// A listener for an accessibility action on a specific node.
@@ -335,6 +377,102 @@ impl A11yNodeBuilder {
     /// Returns whether a node with the given ID has been pushed in this frame.
     pub(crate) fn has_node(&self, id: NodeId) -> bool {
         id == ROOT_NODE_ID || self.seen_ids.contains(&id)
+    }
+
+    /// The text runs of `rows` under the node being built, and `selection` (anchor, head: byte offsets) as its text
+    /// selection ([`Window::a11y_text`]). Nothing under the root, a password's node, or rows whose lengths do not
+    /// cover their words.
+    pub(crate) fn text(&mut self, rows: &[A11yTextRow], selection: Option<(usize, usize)>, scale: f32) {
+        let Some(&parent) = self.ids_stack.last() else {
+            return;
+        };
+        let Some(node) = self.nodes_stack.last_mut() else {
+            return;
+        };
+        if parent == ROOT_NODE_ID || node.role() == Role::PasswordInput {
+            return;
+        }
+        if rows.iter().any(|r| {
+            r.lengths.iter().map(|&l| usize::from(l)).sum::<usize>() != r.text.len()
+                || r.lengths.iter().any(|&l| l == 0)
+        }) {
+            log::error!("a11y: text rows whose character lengths do not cover their words; no text runs published");
+            return;
+        }
+        let px = |p: Pixels| f64::from(p.0 * scale);
+        // (first run, runs) of each row
+        let mut spans = Vec::with_capacity(rows.len());
+        let mut runs: Vec<(NodeId, accesskit::Node)> = Vec::with_capacity(rows.len());
+        for row in rows {
+            let n = row.lengths.len();
+            let laid = row.positions.len() == n && row.widths.len() == n;
+            let first = runs.len();
+            let (mut a, mut byte) = (0, 0);
+            loop {
+                let b = (a + RUN_MAX).min(n);
+                let bytes: usize = row.lengths[a..b].iter().map(|&l| usize::from(l)).sum();
+                let id = run_id(parent, runs.len());
+                let mut run = accesskit::Node::new(Role::TextRun);
+                run.set_value(&row.text[byte..byte + bytes]);
+                run.set_character_lengths(&row.lengths[a..b]);
+                let words: Vec<u8> = row
+                    .word_starts
+                    .iter()
+                    .filter(|&&w| w >= a && w < b)
+                    .filter_map(|&w| u8::try_from(w - a).ok())
+                    .collect();
+                run.set_word_starts(words);
+                run.set_text_direction(accesskit::TextDirection::LeftToRight);
+                if laid {
+                    let left = if a < b { row.positions[a] } else { 0. };
+                    let right = if a < b { row.positions[b - 1] + row.widths[b - 1] } else { left };
+                    let o = row.bounds.origin;
+                    run.set_bounds(accesskit::Rect {
+                        x0: px(o.x + Pixels(left)),
+                        y0: px(o.y),
+                        x1: px(o.x + Pixels(right)),
+                        y1: px(o.y + row.bounds.size.height),
+                    });
+                    run.set_character_positions(
+                        row.positions[a..b].iter().map(|p| (p - left) * scale).collect::<Vec<_>>(),
+                    );
+                    run.set_character_widths(row.widths[a..b].iter().map(|w| w * scale).collect::<Vec<_>>());
+                }
+                if a > 0 {
+                    let prev = run_id(parent, runs.len() - 1);
+                    run.set_previous_on_line(prev);
+                    if let Some((_, p)) = runs.last_mut() {
+                        p.set_next_on_line(id);
+                    }
+                }
+                runs.push((id, run));
+                byte += bytes;
+                a = b;
+                if a >= n {
+                    break;
+                }
+            }
+            spans.push((first, runs.len() - first));
+        }
+        let position = |off: usize| {
+            let (r, i) = row_position(rows, off)?;
+            let (first, count) = spans[r];
+            let k = (i / RUN_MAX).min(count - 1);
+            Some(TextPosition {
+                node: run_id(parent, first + k),
+                character_index: i - k * RUN_MAX,
+            })
+        };
+        if let Some((anchor, head)) = selection
+            && let (Some(anchor), Some(focus)) = (position(anchor), position(head))
+        {
+            node.set_text_selection(TextSelection { anchor, focus });
+        }
+        for (id, run) in runs {
+            if self.push(id, run) {
+                self.pop();
+            }
+        }
     }
 
     /// Set the focused node for this frame. A second call in one frame wins.
