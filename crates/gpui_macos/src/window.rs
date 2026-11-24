@@ -506,6 +506,12 @@ struct MacWindowState {
     cursor_style: CursorStyle,
     cursor_visible: Arc<AtomicBool>,
     display_link: Option<DisplayLink>,
+    /// The window's link while it is hidden, with its display: the next show starts it again (moved to the window's
+    /// display if that changed). A dropped link is forgotten, never released (the crash guard in `DisplayLink`'s
+    /// drop), so a new one at every show kept one for good each time: about 4 a kept panel's show, 1,536 B each.
+    parked_link: Option<(CGDirectDisplayID, DisplayLink)>,
+    /// The display of `display_link`.
+    link_display: CGDirectDisplayID,
     // When the display link runs: it is stopped (not dropped) while frames are far apart; `frame_waker` draws a lone
     // one and starts it for more.
     frame_pace: Arc<FramePace>,
@@ -678,18 +684,38 @@ impl MacWindowState {
             }
         }
         let display_id = unsafe { display_id_for_screen(self.native_window.screen()) };
-        if let Some(mut display_link) =
+        let kept = match self.parked_link.take() {
+            Some((id, link)) if id == display_id => Some(link),
+            Some((_, mut link)) => link.set_display(display_id).log_err().map(|()| link),
+            None => None,
+        };
+        let link = kept.or_else(|| {
             DisplayLink::new(display_id, self.native_view.as_ptr() as *mut c_void, step).log_err()
-        {
+        });
+        if let Some(mut display_link) = link {
             display_link.start().log_err();
             self.display_link = Some(display_link);
+            self.link_display = display_id;
             self.frame_pace.run(self.frames_epoch.elapsed());
         }
     }
 
+    /// The link stops and is kept for the window's next show.
     fn stop_display_link(&mut self) {
-        self.display_link = None;
+        if let Some(mut display_link) = self.display_link.take() {
+            display_link.stop().log_err();
+            self.parked_link = Some((self.link_display, display_link));
+        }
         self.frame_pace.dropped();
+    }
+
+    /// A new link in place of one that gives no frames (the waker's `Replace`): a stopped link started again was seen
+    /// to stay silent, and a new one is what brought frames back.
+    fn replace_display_link(&mut self) {
+        self.display_link = None;
+        self.parked_link = None;
+        self.frame_pace.dropped();
+        self.start_display_link();
     }
 
     fn frame_idle(&mut self, idle: bool) {
@@ -716,7 +742,7 @@ impl MacWindowState {
     /// change makes, does.
     fn resume_frames(&mut self, wake: Wake) {
         if wake == Wake::Replace && self.display_link.is_some() {
-            self.start_display_link();
+            self.replace_display_link();
         }
         if matches!(wake, Wake::Run | Wake::Replace) {
             self.frame_pace.run(self.frames_epoch.elapsed());
@@ -937,6 +963,8 @@ impl MacWindow {
                 cursor_style: CursorStyle::Arrow,
                 cursor_visible,
                 display_link: None,
+                parked_link: None,
+                link_display: 0,
                 frame_pace: Arc::new(FramePace::new()),
                 frames_epoch: Instant::now(),
                 renderer: renderer::new_renderer(
@@ -1217,6 +1245,7 @@ impl Drop for MacWindow {
         let window = this.native_window;
         let sheet_parent = this.sheet_parent.take();
         this.display_link.take();
+        this.parked_link.take();
         // The accessibility adapter holds the view strongly and the view holds this state: dropped here, the view,
         // its layer, its drawables and the renderer's atlas are freed with the window (they stayed for the
         // process's life, about 20 MB a closed window).
@@ -1840,6 +1869,7 @@ impl PlatformWindow for MacWindow {
         let state = Arc::downgrade(&self.0);
         Some(Box::new(move || {
             let wake = pace.wake(epoch.elapsed());
+            crate::present_trace::mark("w", &format!("{wake:?}"));
             if wake != Wake::Nothing
                 && let Some(state) = state.upgrade()
             {
@@ -2490,6 +2520,7 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
 }
 
 extern "C" fn handle_view_event(this: &Object, _: Sel, native_event: id) {
+    crate::present_trace::event(native_event);
     let window_state = unsafe { get_window_state(this) };
     let weak_window_state = Arc::downgrade(&window_state);
     let mut lock = window_state.as_ref().lock();
@@ -2922,6 +2953,7 @@ extern "C" fn step(view: *mut c_void) {
     let mut lock = window_state.lock();
 
     if let Some(mut callback) = lock.request_frame_callback.take() {
+        crate::present_trace::mark("s", "");
         lock.frame_pace.begin(lock.frames_epoch.elapsed());
         drop(lock);
         callback(Default::default());

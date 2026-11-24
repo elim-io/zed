@@ -27,6 +27,7 @@ mod open_type;
 mod text_system;
 
 mod platform;
+mod present_trace;
 mod window;
 mod window_appearance;
 

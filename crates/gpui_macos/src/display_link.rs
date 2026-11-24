@@ -81,6 +81,18 @@ impl DisplayLink {
         Ok(())
     }
 
+    /// The link follows another display (its window moved to it): the same link, so none is made and forgotten.
+    pub fn set_display(&mut self, display_id: CGDirectDisplayID) -> Result<()> {
+        let link = self
+            .display_link
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("no display link"))?;
+        // SAFETY: the link is the window's own, alive while `self` is.
+        let code = unsafe { sys::CVDisplayLinkSetCurrentCGDisplay(link, display_id) };
+        anyhow::ensure!(code == 0, "could not move the display link to display {display_id}, code: {code}");
+        Ok(())
+    }
+
     /// One frame request now, as a vsync would send it: the window's callback runs on the main
     /// queue's next turn.
     pub fn request_frame(&self) {

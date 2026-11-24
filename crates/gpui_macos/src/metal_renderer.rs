@@ -462,7 +462,11 @@ impl MetalRenderer {
             (viewport_size.width.ceil() as i32).into(),
             (viewport_size.height.ceil() as i32).into(),
         );
-        let drawable = if let Some(drawable) = layer.next_drawable() {
+        let asked = std::time::Instant::now();
+        let next = layer.next_drawable();
+        let waited = asked.elapsed();
+        let drawable = if let Some(drawable) = next {
+            crate::present_trace::watch(drawable, waited, self.presents_with_transaction);
             drawable
         } else {
             log::error!(
@@ -1801,3 +1805,4 @@ impl gpui::PlatformHeadlessRenderer for MetalHeadlessRenderer {
         self.renderer.sprite_atlas().clone()
     }
 }
+
