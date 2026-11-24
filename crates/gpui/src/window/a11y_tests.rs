@@ -324,38 +324,42 @@ struct Words;
 
 impl Render for Words {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().id("field").role(Role::MultilineTextInput).size_full().child(
-            crate::canvas(
-                |bounds, window, _| {
-                    let row = |start: usize, text: String, y: f32| {
-                        let n = text.chars().count();
-                        crate::A11yTextRow {
-                            start,
-                            lengths: text.chars().map(|c| c.len_utf8() as u8).collect(),
-                            text,
-                            positions: (0..n).map(|i| i as f32 * 10.).collect(),
-                            widths: vec![10.; n],
-                            word_starts: vec![0],
-                            bounds: Bounds::new(
-                                point(bounds.origin.x + px(4.), bounds.origin.y + px(y)),
-                                size(px(100.), px(20.)),
-                            ),
-                        }
-                    };
-                    let long = "x".repeat(300);
-                    window.a11y_text(
-                        &[
-                            row(0, "ab\n".into(), 0.),
-                            row(3, "cd\n".into(), 20.),
-                            row(6, long, 40.),
-                        ],
-                        Some((1, 4)),
-                    );
-                },
-                |_, _, _, _| {},
+        div()
+            .id("field")
+            .role(Role::MultilineTextInput)
+            .size_full()
+            .child(
+                crate::canvas(
+                    |bounds, window, _| {
+                        let row = |start: usize, text: String, y: f32| {
+                            let n = text.chars().count();
+                            crate::A11yTextRow {
+                                start,
+                                lengths: text.chars().map(|c| c.len_utf8() as u8).collect(),
+                                text,
+                                positions: (0..n).map(|i| i as f32 * 10.).collect(),
+                                widths: vec![10.; n],
+                                word_starts: vec![0],
+                                bounds: Bounds::new(
+                                    point(bounds.origin.x + px(4.), bounds.origin.y + px(y)),
+                                    size(px(100.), px(20.)),
+                                ),
+                            }
+                        };
+                        let long = "x".repeat(300);
+                        window.a11y_text(
+                            &[
+                                row(0, "ab\n".into(), 0.),
+                                row(3, "cd\n".into(), 20.),
+                                row(6, long, 40.),
+                            ],
+                            Some((1, 4)),
+                        );
+                    },
+                    |_, _, _, _| {},
+                )
+                .size_full(),
             )
-            .size_full(),
-        )
     }
 }
 
@@ -376,7 +380,11 @@ fn a_fields_rows_are_text_runs_with_its_selection(cx: &mut TestAppContext) {
         assert!(runs.iter().all(|r| r.role() == Role::TextRun));
         assert_eq!(runs[0].value(), Some("ab\n"));
         assert_eq!(runs[0].character_lengths(), &[1, 1, 1]);
-        assert_eq!(runs[0].character_positions(), Some(&[0., 20., 40.][..]), "device pixels");
+        assert_eq!(
+            runs[0].character_positions(),
+            Some(&[0., 20., 40.][..]),
+            "device pixels"
+        );
         let b = runs[0].bounds().expect("bounds");
         assert_eq!((b.x0, b.y0, b.x1, b.y1), (8., 0., 68., 40.));
         assert_eq!(runs[2].character_lengths().len(), 255);

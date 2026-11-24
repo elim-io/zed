@@ -176,7 +176,7 @@ pub struct A11yTextRow {
     /// Each character's (a grapheme cluster's) length in bytes; their sum is `text`'s length.
     pub lengths: Vec<u8>,
     /// Each character's left edge from the row's left and its advance, in window pixels; empty where the row was not
-    /// laid out (a reader then gets no bounds for it).
+    /// laid out (a reader then gets no bounds for it); a row with no character has none.
     pub positions: Vec<f32>,
     /// Each character's advance, as `positions`.
     pub widths: Vec<f32>,
@@ -191,13 +191,19 @@ const RUN_MAX: usize = 255;
 
 /// The node id of the `index`th text run under `parent`: stable from frame to frame, apart from every element's.
 fn run_id(parent: NodeId, index: usize) -> NodeId {
-    NodeId((parent.0 ^ 0x7e57_0000_0000_0000).wrapping_add((index as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15)))
+    NodeId(
+        (parent.0 ^ 0x7e57_0000_0000_0000)
+            .wrapping_add((index as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15)),
+    )
 }
 
 /// Where `off` (a byte offset of the whole text) falls among `rows`: the row and the character index in it. At a soft
 /// wrap the offset is the next row's start; at a line's end it is its line break; past the end, the last row's end.
 fn row_position(rows: &[A11yTextRow], off: usize) -> Option<(usize, usize)> {
-    let r = rows.partition_point(|row| row.start <= off).checked_sub(1).unwrap_or(0);
+    let r = rows
+        .partition_point(|row| row.start <= off)
+        .checked_sub(1)
+        .unwrap_or(0);
     let row = rows.get(r)?;
     let (mut at, mut i) = (row.start, 0);
     while i < row.lengths.len() && at + usize::from(row.lengths[i]) <= off {
@@ -382,7 +388,12 @@ impl A11yNodeBuilder {
     /// The text runs of `rows` under the node being built, and `selection` (anchor, head: byte offsets) as its text
     /// selection ([`Window::a11y_text`]). Nothing under the root, a password's node, or rows whose lengths do not
     /// cover their words.
-    pub(crate) fn text(&mut self, rows: &[A11yTextRow], selection: Option<(usize, usize)>, scale: f32) {
+    pub(crate) fn text(
+        &mut self,
+        rows: &[A11yTextRow],
+        selection: Option<(usize, usize)>,
+        scale: f32,
+    ) {
         let Some(&parent) = self.ids_stack.last() else {
             return;
         };
@@ -396,7 +407,9 @@ impl A11yNodeBuilder {
             r.lengths.iter().map(|&l| usize::from(l)).sum::<usize>() != r.text.len()
                 || r.lengths.iter().any(|&l| l == 0)
         }) {
-            log::error!("a11y: text rows whose character lengths do not cover their words; no text runs published");
+            log::error!(
+                "a11y: text rows whose character lengths do not cover their words; no text runs published"
+            );
             return;
         }
         let px = |p: Pixels| f64::from(p.0 * scale);
@@ -405,7 +418,7 @@ impl A11yNodeBuilder {
         let mut runs: Vec<(NodeId, accesskit::Node)> = Vec::with_capacity(rows.len());
         for row in rows {
             let n = row.lengths.len();
-            let laid = row.positions.len() == n && row.widths.len() == n;
+            let laid = n > 0 && row.positions.len() == n && row.widths.len() == n;
             let first = runs.len();
             let (mut a, mut byte) = (0, 0);
             loop {
@@ -425,7 +438,11 @@ impl A11yNodeBuilder {
                 run.set_text_direction(accesskit::TextDirection::LeftToRight);
                 if laid {
                     let left = if a < b { row.positions[a] } else { 0. };
-                    let right = if a < b { row.positions[b - 1] + row.widths[b - 1] } else { left };
+                    let right = if a < b {
+                        row.positions[b - 1] + row.widths[b - 1]
+                    } else {
+                        left
+                    };
                     let o = row.bounds.origin;
                     run.set_bounds(accesskit::Rect {
                         x0: px(o.x + Pixels(left)),
@@ -434,9 +451,17 @@ impl A11yNodeBuilder {
                         y1: px(o.y + row.bounds.size.height),
                     });
                     run.set_character_positions(
-                        row.positions[a..b].iter().map(|p| (p - left) * scale).collect::<Vec<_>>(),
+                        row.positions[a..b]
+                            .iter()
+                            .map(|p| (p - left) * scale)
+                            .collect::<Vec<_>>(),
                     );
-                    run.set_character_widths(row.widths[a..b].iter().map(|w| w * scale).collect::<Vec<_>>());
+                    run.set_character_widths(
+                        row.widths[a..b]
+                            .iter()
+                            .map(|w| w * scale)
+                            .collect::<Vec<_>>(),
+                    );
                 }
                 if a > 0 {
                     let prev = run_id(parent, runs.len() - 1);
